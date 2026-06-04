@@ -2895,6 +2895,301 @@
 			}
 		}
 	},
+	"azure-anthropic-serverless": {
+		"claude-haiku-4-5": {
+			"id": "claude-haiku-4-5",
+			"name": "Haiku 4.5 (Azure)",
+			"api": "anthropic-messages",
+			"provider": "azure-anthropic-serverless",
+			"baseUrl": "https://alex-mfadefxr-eastus2.services.ai.azure.com/anthropic",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 200000,
+			"maxTokens": 32768,
+			"headers": {
+				"anthropic-beta": "context-1m-2025-08-07"
+			}
+		},
+		"claude-opus-4-7": {
+			"id": "claude-opus-4-7",
+			"name": "Opus 4.7 (Azure, 1M)",
+			"api": "anthropic-messages",
+			"provider": "azure-anthropic-serverless",
+			"baseUrl": "https://alex-mfadefxr-eastus2.services.ai.azure.com/anthropic",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 32768,
+			"thinking": {
+				"mode": "anthropic-adaptive",
+				"minLevel": "minimal",
+				"maxLevel": "xhigh"
+			},
+			"headers": {
+				"anthropic-beta": "context-1m-2025-08-07"
+			}
+		},
+		"claude-opus-4-8": {
+			"id": "claude-opus-4-8",
+			"name": "Opus 4.8 (Azure, 1M)",
+			"api": "anthropic-messages",
+			"provider": "azure-anthropic-serverless",
+			"baseUrl": "https://alex-mfadefxr-eastus2.services.ai.azure.com/anthropic",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 32768,
+			"thinking": {
+				"mode": "anthropic-adaptive",
+				"minLevel": "minimal",
+				"maxLevel": "xhigh"
+			},
+			"headers": {
+				"anthropic-beta": "context-1m-2025-08-07"
+			}
+		},
+		"claude-sonnet-4-6": {
+			"id": "claude-sonnet-4-6",
+			"name": "Sonnet 4.6 (Azure, 1M)",
+			"api": "anthropic-messages",
+			"provider": "azure-anthropic-serverless",
+			"baseUrl": "https://alex-mfadefxr-eastus2.services.ai.azure.com/anthropic",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 32768,
+			"thinking": {
+				"mode": "anthropic-adaptive",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			},
+			"headers": {
+				"anthropic-beta": "context-1m-2025-08-07"
+			}
+		}
+	},
+	"azure-openai": {
+		"gpt-4.1": {
+			"id": "gpt-4.1",
+			"name": "GPT-4.1 (Azure)",
+			"api": "openai-completions",
+			"provider": "azure-openai",
+			"baseUrl": "https://alex-mfadefxr-eastus2.openai.azure.com/openai",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048576,
+			"maxTokens": 32768,
+			"compat": {
+				"maxTokensField": "max_tokens"
+			}
+		},
+		"gpt-5.2": {
+			"id": "gpt-5.2",
+			"name": "GPT-5.2 (Azure)",
+			"api": "openai-completions",
+			"provider": "azure-openai",
+			"baseUrl": "https://alex-mfadefxr-eastus2.openai.azure.com/openai",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048576,
+			"maxTokens": 32768,
+			"compat": {
+				"maxTokensField": "max_completion_tokens"
+			}
+		},
+		"gpt-5.2-chat": {
+			"id": "gpt-5.2-chat",
+			"name": "GPT-5.2 Chat (Azure)",
+			"api": "openai-completions",
+			"provider": "azure-openai",
+			"baseUrl": "https://alex-mfadefxr-eastus2.openai.azure.com/openai",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048576,
+			"maxTokens": 32768,
+			"compat": {
+				"maxTokensField": "max_completion_tokens"
+			}
+		},
+		"gpt-5.4": {
+			"id": "gpt-5.4",
+			"name": "GPT-5.4 (Azure)",
+			"api": "openai-completions",
+			"provider": "azure-openai",
+			"baseUrl": "https://alex-mfadefxr-eastus2.openai.azure.com/openai",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 400000,
+			"maxTokens": 32768,
+			"contextPromotionTarget": "azure-anthropic-serverless/claude-opus-4-7",
+			"compat": {
+				"maxTokensField": "max_completion_tokens"
+			}
+		},
+		"grok-4": {
+			"id": "grok-4",
+			"name": "Grok-4 (Azure)",
+			"api": "openai-completions",
+			"provider": "azure-openai",
+			"baseUrl": "https://alex-mfadefxr-eastus2.openai.azure.com/openai",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 32768,
+			"compat": {
+				"maxTokensField": "max_tokens"
+			}
+		}
+	},
+	"azure-openai-responses": {
+		"gpt-5.3-codex": {
+			"id": "gpt-5.3-codex",
+			"name": "GPT-5.3 Codex (Azure Responses)",
+			"api": "azure-openai-responses",
+			"provider": "azure-openai-responses",
+			"baseUrl": "https://alex-mfadefxr-eastus2.openai.azure.com/openai",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 400000,
+			"maxTokens": 32768,
+			"contextPromotionTarget": "azure-anthropic-serverless/claude-opus-4-7",
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			}
+		},
+		"gpt-5.4-pro": {
+			"id": "gpt-5.4-pro",
+			"name": "GPT-5.4 Pro (Azure Responses)",
+			"api": "azure-openai-responses",
+			"provider": "azure-openai-responses",
+			"baseUrl": "https://alex-mfadefxr-eastus2.openai.azure.com/openai",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 400000,
+			"maxTokens": 32768,
+			"contextPromotionTarget": "azure-anthropic-serverless/claude-opus-4-7",
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			}
+		},
+		"gpt-5.5": {
+			"id": "gpt-5.5",
+			"name": "GPT-5.5 (Azure Responses)",
+			"api": "azure-openai-responses",
+			"provider": "azure-openai-responses",
+			"baseUrl": "https://alex-mfadefxr-eastus2.openai.azure.com/openai",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 32768,
+			"contextPromotionTarget": "azure-anthropic-serverless/claude-opus-4-7",
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			}
+		}
+	},
 	"cerebras": {
 		"gpt-oss-120b": {
 			"id": "gpt-oss-120b",
