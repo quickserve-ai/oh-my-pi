@@ -121,9 +121,11 @@ describe("listClaudePluginRoots", () => {
 		});
 	});
 
-	test("parses plugin with project scope", async () => {
+	test("includes project-scoped plugin only for matching canonical cwd", async () => {
 		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const projectDir = path.join(tempDir, "projects", "owner");
 		await fs.mkdir(pluginsDir, { recursive: true });
+		await fs.mkdir(projectDir, { recursive: true });
 
 		const registry = {
 			version: 2,
@@ -131,57 +133,94 @@ describe("listClaudePluginRoots", () => {
 				"project-plugin@market": [
 					{
 						scope: "project",
+						projectPath: path.join(projectDir, "."),
 						installPath: "/path/to/project-plugin",
 						version: "2.0.0",
-						installedAt: "2025-01-01T00:00:00Z",
-						lastUpdated: "2025-01-01T00:00:00Z",
 					},
 				],
 			},
 		};
-
 		await fs.writeFile(path.join(pluginsDir, "installed_plugins.json"), JSON.stringify(registry));
 
-		const result = await listClaudePluginRoots(tempDir);
+		const result = await listClaudePluginRoots(tempDir, projectDir);
 		expect(result.roots).toHaveLength(1);
 		expect(result.roots[0].scope).toBe("project");
 	});
 
-	test("handles multiple entries per plugin ID", async () => {
+	test("excludes project-scoped plugin for different or missing cwd", async () => {
 		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const ownerDir = path.join(tempDir, "projects", "owner");
+		const otherDir = path.join(tempDir, "projects", "other");
 		await fs.mkdir(pluginsDir, { recursive: true });
+		await fs.mkdir(otherDir, { recursive: true });
+
+		const registry = {
+			version: 2,
+			plugins: {
+				"project-plugin@market": [
+					{
+						scope: "project",
+						projectPath: ownerDir,
+						installPath: "/path/to/project-plugin",
+						version: "2.0.0",
+					},
+				],
+			},
+		};
+		await fs.writeFile(path.join(pluginsDir, "installed_plugins.json"), JSON.stringify(registry));
+
+		expect((await listClaudePluginRoots(tempDir, otherDir)).roots).toEqual([]);
+		expect((await listClaudePluginRoots(tempDir)).roots).toEqual([]);
+	});
+
+	test("retains user entry but excludes project entry outside its project", async () => {
+		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const otherDir = path.join(tempDir, "projects", "other");
+		await fs.mkdir(pluginsDir, { recursive: true });
+		await fs.mkdir(otherDir, { recursive: true });
 
 		const registry = {
 			version: 2,
 			plugins: {
 				"multi-plugin@market": [
-					{
-						scope: "user",
-						installPath: "/path/to/v2",
-						version: "2.0.0",
-						installedAt: "2025-01-02T00:00:00Z",
-						lastUpdated: "2025-01-02T00:00:00Z",
-					},
+					{ scope: "user", installPath: "/path/to/user", version: "2.0.0" },
 					{
 						scope: "project",
-						installPath: "/path/to/v1",
+						projectPath: path.join(tempDir, "projects", "owner"),
+						installPath: "/path/to/project",
 						version: "1.0.0",
-						installedAt: "2025-01-01T00:00:00Z",
-						lastUpdated: "2025-01-01T00:00:00Z",
 					},
 				],
 			},
 		};
-
 		await fs.writeFile(path.join(pluginsDir, "installed_plugins.json"), JSON.stringify(registry));
 
-		const result = await listClaudePluginRoots(tempDir);
-		// Should return both entries, not just the first one
-		expect(result.roots).toHaveLength(2);
-		expect(result.roots[0].version).toBe("2.0.0");
+		const result = await listClaudePluginRoots(tempDir, otherDir);
+		expect(result.roots).toHaveLength(1);
 		expect(result.roots[0].scope).toBe("user");
-		expect(result.roots[1].version).toBe("1.0.0");
-		expect(result.roots[1].scope).toBe("project");
+		expect(result.roots[0].path).toBe("/path/to/user");
+	});
+
+	test("treats local scope as project-bound", async () => {
+		const pluginsDir = path.join(tempDir, ".claude", "plugins");
+		const projectDir = path.join(tempDir, "projects", "owner");
+		await fs.mkdir(pluginsDir, { recursive: true });
+		await fs.mkdir(projectDir, { recursive: true });
+		await fs.writeFile(
+			path.join(pluginsDir, "installed_plugins.json"),
+			JSON.stringify({
+				version: 2,
+				plugins: {
+					"local-plugin@market": [
+						{ scope: "local", projectPath: projectDir, installPath: "/path/to/local", version: "1.0.0" },
+					],
+				},
+			}),
+		);
+
+		expect((await listClaudePluginRoots(tempDir, projectDir)).roots).toHaveLength(1);
+		clearClaudePluginRootsCache();
+		expect((await listClaudePluginRoots(tempDir, tempDir)).roots).toEqual([]);
 	});
 
 	test("warns on invalid plugin ID format", async () => {
@@ -514,6 +553,7 @@ describe("discoverAgents plugin precedence", () => {
 					},
 					{
 						scope: "project",
+						projectPath: tempDir,
 						installPath: projectPluginPath,
 						version: "1.0.1",
 						installedAt: "2025-01-02T00:00:00Z",
