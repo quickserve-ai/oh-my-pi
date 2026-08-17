@@ -130,6 +130,16 @@ When `CLAUDE_CODE_USE_FOUNDRY` is enabled, Anthropic requests switch to Foundry 
 
 Region fallback in provider code: `options.region` → `AWS_REGION` → `AWS_DEFAULT_REGION` → `us-east-1`.
 
+### Bundled Quickserve Azure providers
+
+The built-in Quickserve Azure provider catalog uses three provider ids:
+
+- `azure-openai` — Azure OpenAI chat-completions deployments.
+- `azure-openai-responses` — Azure OpenAI Responses deployments.
+- `azure-anthropic-serverless` — Azure AI Foundry Anthropic serverless deployments.
+
+All three resolve auth from `AZURE_OPENAI_API_KEY`. Their bundled model entries carry the Azure/Foundry base URLs, so role selections such as `azure-openai-responses/gpt-5.5` and `azure-anthropic-serverless/claude-opus-4-7` do not require a user-local `models.yml` just to avoid falling through to another provider.
+
 ### Azure OpenAI Responses
 
 | Variable                           | Default / behavior                                                          |

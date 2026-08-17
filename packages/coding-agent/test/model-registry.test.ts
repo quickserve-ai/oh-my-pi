@@ -146,6 +146,41 @@ describe("ModelRegistry", () => {
 		});
 	}
 
+	test("bundles Quickserve Azure providers without requiring models.yml", () => {
+		const previousKey = process.env.AZURE_OPENAI_API_KEY;
+		process.env.AZURE_OPENAI_API_KEY = "test-azure-key";
+		try {
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+
+			const completionsModel = registry.find("azure-openai", "gpt-5.4");
+			expect(completionsModel?.api).toBe("openai-completions");
+			expect(completionsModel?.baseUrl).toBe("https://alex-mfadefxr-eastus2.openai.azure.com/openai");
+			expect(completionsModel?.contextPromotionTarget).toBe("azure-anthropic-serverless/claude-opus-4-7");
+
+			const responsesModel = registry.find("azure-openai-responses", "gpt-5.5");
+			expect(responsesModel?.api).toBe("azure-openai-responses");
+			expect(responsesModel?.baseUrl).toBe("https://alex-mfadefxr-eastus2.openai.azure.com/openai");
+			expect(responsesModel?.contextWindow).toBe(1_000_000);
+			expect(responsesModel?.contextPromotionTarget).toBe("azure-anthropic-serverless/claude-opus-4-7");
+
+			const anthropicModel = registry.find("azure-anthropic-serverless", "claude-opus-4-7");
+			expect(anthropicModel?.api).toBe("anthropic-messages");
+			expect(anthropicModel?.baseUrl).toBe("https://alex-mfadefxr-eastus2.services.ai.azure.com/anthropic");
+			expect(anthropicModel?.headers?.["anthropic-beta"]).toBe("context-1m-2025-08-07");
+			expect(anthropicModel?.thinking?.mode).toBe("anthropic-adaptive");
+
+			expect(registry.getAvailable().some(model => model.provider === "azure-openai")).toBe(true);
+			expect(registry.getAvailable().some(model => model.provider === "azure-openai-responses")).toBe(true);
+			expect(registry.getAvailable().some(model => model.provider === "azure-anthropic-serverless")).toBe(true);
+		} finally {
+			if (previousKey === undefined) {
+				delete process.env.AZURE_OPENAI_API_KEY;
+			} else {
+				process.env.AZURE_OPENAI_API_KEY = previousKey;
+			}
+		}
+	});
+
 	describe("canonical equivalence", () => {
 		test("groups dotted provider variants under the bundled canonical id", () => {
 			writeRawModelsJson({
@@ -235,7 +270,7 @@ describe("ModelRegistry", () => {
 			});
 
 			const registry = new ModelRegistry(authStorage, modelsJsonPath);
-			const opusVariants = registry.getCanonicalVariants("claude-opus-4-7");
+			const opusVariants = registry.getCanonicalVariants("claude-opus-4-8");
 			const haikuVariants = registry.getCanonicalVariants("claude-haiku-4-5");
 
 			expect(opusVariants.some(variant => variant.selector === "demo/anthropic/claude-opus-latest")).toBe(true);

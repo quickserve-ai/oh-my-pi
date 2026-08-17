@@ -483,6 +483,7 @@ return config
 | OpenAI                                          | `OPENAI_API_KEY`                             |
 | Google                                          | `GEMINI_API_KEY`                             |
 | Mistral                                         | `MISTRAL_API_KEY`                            |
+| Azure OpenAI / Azure Anthropic serverless       | `AZURE_OPENAI_API_KEY`                       |
 | Groq                                            | `GROQ_API_KEY`                               |
 | Cerebras                                        | `CEREBRAS_API_KEY`                           |
 | Hugging Face (`huggingface`)                    | `HUGGINGFACE_HUB_TOKEN` or `HF_TOKEN`        |

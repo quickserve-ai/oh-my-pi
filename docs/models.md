@@ -23,6 +23,16 @@ Legacy behavior still present:
 - If `models.yml` is missing and `models.json` exists at the same location, it is migrated to `models.yml`.
 - Explicit `.json` / `.jsonc` config paths are still supported when passed programmatically to `ModelRegistry`.
 
+## Bundled Quickserve Azure providers
+
+The packaged model catalog includes Quickserve's Azure provider ids:
+
+- `azure-openai` for Azure OpenAI chat-completions deployments.
+- `azure-openai-responses` for Azure OpenAI Responses deployments.
+- `azure-anthropic-serverless` for Azure AI Foundry Anthropic serverless deployments.
+
+These providers are available without a user-local `models.yml`; auth resolves through `AZURE_OPENAI_API_KEY`. Keep `models.yml` for local overrides only — deleting it must not make configured Azure role selectors fall through to unrelated bundled providers.
+
 ## `models.yml` shape
 
 ```yaml
