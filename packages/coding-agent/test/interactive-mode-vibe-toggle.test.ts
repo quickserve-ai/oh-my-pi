@@ -145,6 +145,7 @@ describe("InteractiveMode vibe mode toggle", () => {
 	let mode: InteractiveMode;
 	let modelRegistry: ModelRegistry;
 	let storage: ExitFaultStorage;
+	let failVibePrompt = false;
 
 	beforeAll(async () => {
 		await initTheme();
@@ -154,6 +155,7 @@ describe("InteractiveMode vibe mode toggle", () => {
 	});
 
 	beforeEach(async () => {
+		failVibePrompt = false;
 		resetSettingsForTest();
 		VibeSessionRegistry.resetGlobalForTests();
 		await Settings.init({ inMemory: true, cwd: tempDir.path() });
@@ -185,6 +187,12 @@ describe("InteractiveMode vibe mode toggle", () => {
 			toolRegistry: new Map(registryTools.map(tool => [tool.name, tool])),
 			builtInToolNames: registryTools.map(tool => tool.name),
 			createVibeTools: () => VIBE_TOOL_NAMES.map(stubTool),
+			rebuildSystemPrompt: async toolNames => {
+				if (failVibePrompt && toolNames.includes("vibe_spawn")) {
+					throw new Error("Vibe prompt refresh failed");
+				}
+				return { systemPrompt: ["Test"] };
+			},
 		});
 		mode = new InteractiveMode(session, "test", undefined, undefined, undefined, undefined, new EventBus());
 	});
@@ -200,6 +208,137 @@ describe("InteractiveMode vibe mode toggle", () => {
 	afterAll(() => {
 		authStorage.close();
 		tempDir.removeSync();
+	});
+
+	it("starts a fresh parent in Vibe before its first turn, ahead of the plan startup default", async () => {
+		session.settings.set("vibe.defaultOnStartup", true);
+		session.settings.set("plan.defaultOnStartup", true);
+		await mode.init({ suppressWelcomeIntro: true });
+
+		expect(mode.vibeModeEnabled).toBe(true);
+		expect(mode.planModeEnabled).toBe(false);
+		expect(session.getActiveToolNames().toSorted()).toEqual(["read", "todo", ...VIBE_TOOL_NAMES].toSorted());
+		await mode.handleVibeModeCommand();
+		expect(session.getActiveToolNames()).toEqual([]);
+		expect(session.getAllToolNames().toSorted()).toEqual(["read", "todo"]);
+	});
+
+	it("defaults resumed ordinary parents and new sessions to Vibe without duplicating persisted entries", async () => {
+		session.settings.set("vibe.defaultOnStartup", true);
+		session.sessionManager.appendMessage({ role: "user", content: "prior work", timestamp: Date.now() });
+		session.sessionManager.appendModeChange("none");
+		await mode.init({ suppressWelcomeIntro: true });
+		expect(mode.vibeModeEnabled).toBe(true);
+		await session.sessionManager.ensureOnDisk();
+		const file = session.sessionFile!;
+		await session.switchSession(file);
+		expect(mode.vibeModeEnabled).toBe(true);
+		expect(vibeModeEntryCount(session.sessionManager)).toBe(1);
+
+		// Default entry must not bypass the existing worker/lifecycle safety gate.
+		await expect(session.newSession()).rejects.toThrow("Exit vibe mode first");
+		await mode.handleVibeModeCommand();
+		await session.newSession();
+		expect(mode.vibeModeEnabled).toBe(true);
+		expect(session.getActiveToolNames().toSorted()).toEqual(["read", "todo", ...VIBE_TOOL_NAMES].toSorted());
+	});
+
+	it("keeps an explicit Vibe exit effective when a session switch is rejected", async () => {
+		session.settings.set("vibe.defaultOnStartup", true);
+		await mode.init({ suppressWelcomeIntro: true });
+		await mode.handleVibeModeCommand();
+		await session.sessionManager.ensureOnDisk();
+		const sourceFile = session.sessionFile;
+		const target = SessionManager.create(path.join(tempDir.path(), "elsewhere"), tempDir.path(), storage);
+		target.appendMessage({ role: "user", content: "target", timestamp: Date.now() });
+		await target.ensureOnDisk();
+		try {
+			expect(await session.switchSession(target.getSessionFile()!, { onCwdChange: async () => false })).toBe(false);
+			expect(session.sessionFile).toBe(sourceFile);
+			expect(mode.vibeModeEnabled).toBe(false);
+			expect(session.sessionManager.buildSessionContext().mode).toBe("none");
+			expect(session.getActiveToolNames()).toEqual([]);
+		} finally {
+			await target.close();
+		}
+	});
+
+	it("rejects a switch whose default Vibe activation fails and restores ordinary tools", async () => {
+		session.settings.set("vibe.defaultOnStartup", true);
+		await mode.init({ suppressWelcomeIntro: true });
+		await mode.handleVibeModeCommand();
+		await session.sessionManager.ensureOnDisk();
+		const sourceFile = session.sessionFile;
+		const target = SessionManager.create(tempDir.path(), tempDir.path(), storage);
+		target.appendMessage({ role: "user", content: "target", timestamp: Date.now() });
+		await target.ensureOnDisk();
+		failVibePrompt = true;
+		try {
+			await expect(session.switchSession(target.getSessionFile()!)).rejects.toThrow("Vibe prompt refresh failed");
+			expect(session.sessionFile).toBe(sourceFile);
+			expect(mode.vibeModeEnabled).toBe(false);
+			expect(session.getAllToolNames().toSorted()).toEqual(["read", "todo"]);
+			expect(session.getActiveToolNames()).toEqual([]);
+		} finally {
+			await target.close();
+		}
+	});
+
+	it.each(["plan", "plan_paused"] as const)(
+		"preserves a restored %s instead of imposing the Vibe default",
+		async restoredMode => {
+			session.settings.set("vibe.defaultOnStartup", true);
+			session.sessionManager.appendModeChange(restoredMode, { planFilePath: "local://PLAN.md" });
+			await mode.init({ suppressWelcomeIntro: true });
+			expect(mode.vibeModeEnabled).toBe(false);
+			expect(mode.planModeEnabled).toBe(restoredMode === "plan");
+			expect(mode.planModePaused).toBe(restoredMode === "plan_paused");
+			expect(session.getAllToolNames()).not.toContain("vibe_spawn");
+		},
+	);
+
+	it.each(["goal", "goal_paused"] as const)(
+		"preserves work from a restored %s with the Vibe default enabled",
+		async restoredMode => {
+			session.settings.set("vibe.defaultOnStartup", true);
+			session.sessionManager.appendModeChange(restoredMode, {
+				goal: {
+					id: "retained-goal",
+					objective: "Keep the existing work",
+					status: restoredMode === "goal" ? "active" : "paused",
+					tokensUsed: 123,
+					timeUsedSeconds: 12,
+					createdAt: 1,
+					updatedAt: 1,
+				},
+			});
+			await mode.init({ suppressWelcomeIntro: true });
+			expect(mode.vibeModeEnabled).toBe(false);
+			expect(mode.goalModePaused).toBe(true);
+			expect(session.getGoalModeState()?.goal).toMatchObject({
+				id: "retained-goal",
+				tokensUsed: 123,
+				status: "paused",
+			});
+		},
+	);
+
+	it("does not turn a worker into a director when it inherits the startup setting", async () => {
+		await session.dispose();
+		session = new AgentSession({
+			agent: new Agent({ initialState: { model: modelRegistry.find("anthropic", "claude-sonnet-4-5") } }),
+			agentKind: "sub",
+			sessionManager: SessionManager.create(tempDir.path(), tempDir.path(), storage),
+			settings: Settings.isolated({ "vibe.defaultOnStartup": true }),
+			modelRegistry,
+			toolRegistry: new Map([["read", stubTool("read")]]),
+			createVibeTools: () => VIBE_TOOL_NAMES.map(stubTool),
+		});
+		mode.stop();
+		mode = new InteractiveMode(session, "test");
+		await mode.init({ suppressWelcomeIntro: true });
+		expect(mode.vibeModeEnabled).toBe(false);
+		expect(session.getAllToolNames()).toEqual(["read"]);
 	});
 
 	it("preserves the parent Todo tool and restores the exact pre-vibe toolset on exit", async () => {

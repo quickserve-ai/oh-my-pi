@@ -1824,8 +1824,14 @@ export class InteractiveMode implements InteractiveModeContext {
 			await this.#liveCommandController.stop();
 			await this.#quiesceVibeForSessionSwitch();
 		});
-		this.session.setSessionSwitchReconciler?.(() => this.#reconcileModeFromSession({ preserveActiveGoal: true }));
-		await logger.time("InteractiveMode.init:reconcileMode", () => this.#reconcileModeFromSession());
+		this.session.setSessionSwitchReconciler?.(async ({ applyStartupDefault }) => {
+			await this.#reconcileModeFromSession({ preserveActiveGoal: true });
+			if (applyStartupDefault) await this.#applyVibeStartupDefault();
+		});
+		await logger.time("InteractiveMode.init:reconcileMode", async () => {
+			await this.#reconcileModeFromSession();
+			await this.#applyVibeStartupDefault();
+		});
 
 		// Brand-new sessions optionally start in plan mode when the user has made it
 		// the startup default. "Brand-new" means the resolved branch carries no
@@ -4986,6 +4992,22 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
+	/** Launch/switch policy only: explicit mode exit stays usable within a session. */
+	async #applyVibeStartupDefault(): Promise<void> {
+		if (
+			!this.session.settings.get("vibe.defaultOnStartup") ||
+			this.session.getAgentKind() !== "main" ||
+			this.vibeModeEnabled ||
+			this.planModeEnabled ||
+			this.planModePaused ||
+			this.goalModeEnabled ||
+			this.goalModePaused
+		) {
+			return;
+		}
+		await this.#enterVibeMode();
+	}
+
 	async #enterVibeMode(options?: { persistModeChange?: boolean; previousTools?: string[] }): Promise<void> {
 		if (this.vibeModeEnabled) {
 			return;
@@ -5025,7 +5047,16 @@ export class InteractiveMode implements InteractiveModeContext {
 		// awaits it below, so a failure is always observed (no unhandled
 		// rejection) and propagates to every joiner, dropping their prompts.
 		const entry = (async () => {
-			await this.session.activateVibeTools(vibeBaseTools);
+			try {
+				await this.session.activateVibeTools(vibeBaseTools);
+			} catch (error) {
+				try {
+					await this.session.deactivateVibeTools(previousTools);
+				} finally {
+					await vibeRegistry.suspendScope(ownerScope, this.session.asyncJobManager);
+				}
+				throw error;
+			}
 			this.#vibeModePreviousTools = previousTools;
 			this.#vibeModeOwnerScope = ownerScope;
 			this.vibeModeEnabled = true;
