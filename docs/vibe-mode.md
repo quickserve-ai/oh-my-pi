@@ -30,13 +30,15 @@ vibe:
   defaultOnStartup: true
 ```
 
+Use `--vibe` or `--no-vibe` for a runtime-only override. CLI flags take precedence over global settings, project settings, and `--config` overlays; if both flags appear, the last one wins. `--no-vibe` disables the startup default even when configuration enables it, but does not erase an already-persisted Vibe, plan, or goal mode.
+
 The setting is opt-in. It enters Vibe before the first task turn of a top-level interactive session, including ordinary resumed sessions, session switches, and new sessions. It takes precedence over `plan.defaultOnStartup` on a fresh launch, but never replaces an active or paused plan or goal. Persisted Vibe sessions keep the normal restoration and worker-rehydration behavior.
 
 Workers and headless print/RPC/SDK sessions do not inherit director mode from this setting. Tool-approval settings and provider safety checks are independent and unchanged.
 
 `/vibe` can still exit for the current session. The default applies again on the next launch or session transition, even if the resumed session last recorded an explicit Vibe exit. Exit Vibe before `/new`, fork, move, or handoff; the setting does not bypass worker cleanup or those transition guards.
 
-If default activation fails after `/new` has already created its transcript, the new session remains valid, its lifecycle hook still runs, and an error notice reports the mode failure. Failed activation removes the transient Vibe tools; retry `/vibe` after resolving the error. A failed switch to an existing session rolls back instead, without reapplying the startup default to the original session.
+If default activation fails after `/new` or a successful session switch has committed its transcript, the completed transition remains valid and an error notice reports the mode failure. The `/new` lifecycle hook still runs. Failed activation removes the transient Vibe tools; retry `/vibe` after resolving the error. A switch rejected or rolled back for another reason does not reapply the startup default to the original session.
 
 ## The two worker tiers
 
