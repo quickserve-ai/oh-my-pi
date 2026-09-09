@@ -36,6 +36,8 @@ Workers and headless print/RPC/SDK sessions do not inherit director mode from th
 
 `/vibe` can still exit for the current session. The default applies again on the next launch or session transition, even if the resumed session last recorded an explicit Vibe exit. Exit Vibe before `/new`, fork, move, or handoff; the setting does not bypass worker cleanup or those transition guards.
 
+If default activation fails after `/new` has already created its transcript, the new session remains valid, its lifecycle hook still runs, and an error notice reports the mode failure. Failed activation removes the transient Vibe tools; retry `/vibe` after resolving the error. A failed switch to an existing session rolls back instead, without reapplying the startup default to the original session.
+
 ## The two worker tiers
 
 Every worker is a real, keep-alive task-executor subagent with the normal coding tool surface and its own persisted child transcript. Choose a tier when spawning:

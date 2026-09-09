@@ -7664,7 +7664,22 @@ export class AgentSession {
 			// turn goes out.
 			resetCapabilities();
 			await this.refreshBaseSystemPrompt();
-			await this.#sessionSwitchReconciler?.({ applyStartupDefault: true });
+			try {
+				await this.#sessionSwitchReconciler?.({ applyStartupDefault: true });
+			} catch (error) {
+				// The new transcript already owns the session. A startup-mode
+				// failure cannot undo that transition or suppress its lifecycle hook.
+				logger.warn("Failed to reconcile mode after new session", {
+					sessionFile: this.sessionFile,
+					error: String(error),
+				});
+				this.#emit({
+					type: "notice",
+					level: "error",
+					source: "session-mode",
+					message: `New session started, but its startup mode failed: ${String(error)}`,
+				});
+			}
 
 			// Emit session_switch event with reason "new" to hooks
 			if (this.#extensionRunner) {
