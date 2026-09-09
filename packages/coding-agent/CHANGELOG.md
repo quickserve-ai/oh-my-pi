@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `vibe.defaultOnStartup` and runtime `--vibe` / `--no-vibe` overrides to start top-level interactive sessions in Vibe, including resume and new-session transitions, without replacing active plans or goals.
+
 ## [18.1.10] - 2026-09-04
 
 ### Changed

@@ -501,6 +501,8 @@ function cloneMessageEndNotification(message: AgentMessage): AgentMessage {
 const INTERRUPTED_THINKING_MIN_CHARS = 60;
 const SESSION_CWD_CHANGE_REJECTED = Symbol("sessionCwdChangeRejected");
 
+type SessionModeReconciler = (options: { applyStartupDefault: boolean }) => Promise<void>;
+
 /**
  * Translate a `power.sleepPrevention` mode into `PowerAssertion.start` options,
  * or `undefined` when the mode asks for no assertion at all.
@@ -1866,6 +1868,10 @@ export class AgentSession {
 		return this.#agentId;
 	}
 
+	getAgentKind(): "main" | "sub" {
+		return this.#agentKind;
+	}
+
 	/** Dequeue the next HARD forced tool choice for the upcoming LLM call, dropping
 	 *  (and rejecting) one whose named tool is no longer active. */
 	#nextHardToolChoice(): ToolChoice | undefined {
@@ -1965,9 +1971,9 @@ export class AgentSession {
 		this.#sessionBeforeSwitchReconciler = reconciler ?? undefined;
 	}
 
-	#sessionSwitchReconciler: (() => Promise<void>) | undefined;
+	#sessionSwitchReconciler: SessionModeReconciler | undefined;
 
-	setSessionSwitchReconciler(reconciler: (() => Promise<void>) | null): void {
+	setSessionSwitchReconciler(reconciler: SessionModeReconciler | null): void {
 		this.#sessionSwitchReconciler = reconciler ?? undefined;
 	}
 
@@ -1982,7 +1988,7 @@ export class AgentSession {
 	 */
 	async #reconcileModeAfterBranch(): Promise<void> {
 		try {
-			await this.#sessionSwitchReconciler?.();
+			await this.#sessionSwitchReconciler?.({ applyStartupDefault: true });
 		} catch (error) {
 			logger.warn("Failed to reconcile session mode after branch", {
 				sessionFile: this.sessionFile,
@@ -7658,6 +7664,22 @@ export class AgentSession {
 			// turn goes out.
 			resetCapabilities();
 			await this.refreshBaseSystemPrompt();
+			try {
+				await this.#sessionSwitchReconciler?.({ applyStartupDefault: true });
+			} catch (error) {
+				// The new transcript already owns the session. A startup-mode
+				// failure cannot undo that transition or suppress its lifecycle hook.
+				logger.warn("Failed to reconcile mode after new session", {
+					sessionFile: this.sessionFile,
+					error: String(error),
+				});
+				this.#emit({
+					type: "notice",
+					level: "error",
+					source: "session-mode",
+					message: `New session started, but its startup mode failed: ${String(error)}`,
+				});
+			}
 
 			// Emit session_switch event with reason "new" to hooks
 			if (this.#extensionRunner) {
@@ -8939,11 +8961,17 @@ export class AgentSession {
 			}
 			this.#reconnectToAgent();
 			try {
-				await this.#sessionSwitchReconciler?.();
+				await this.#sessionSwitchReconciler?.({ applyStartupDefault: true });
 			} catch (error) {
 				logger.warn("Failed to reconcile session mode after switch", {
 					targetSessionFile: sessionPath,
 					error: String(error),
+				});
+				this.#emit({
+					type: "notice",
+					level: "error",
+					source: "session-mode",
+					message: `Session switched, but its startup mode failed: ${String(error)}`,
 				});
 			}
 			// Refresh the workspace-roots block to match the resumed session's directory set.
@@ -9027,7 +9055,7 @@ export class AgentSession {
 			this.#advisors.reattachRecorderFeeds();
 			this.#reconnectToAgent();
 			try {
-				await this.#sessionSwitchReconciler?.();
+				await this.#sessionSwitchReconciler?.({ applyStartupDefault: false });
 			} catch (reconcileError) {
 				logger.warn("Failed to reconcile session mode after switch rollback", {
 					targetSessionFile: sessionPath,

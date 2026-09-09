@@ -4757,6 +4757,18 @@ export const SETTINGS_SCHEMA = {
 	// Tasks
 	// ────────────────────────────────────────────────────────────────────────
 
+	"vibe.defaultOnStartup": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Start in Vibe Mode",
+			description:
+				"Enter Vibe on top-level interactive launch and session switch, preserving active or paused plans and goals",
+		},
+	},
+
 	// Plan mode
 	"plan.enabled": {
 		type: "boolean",

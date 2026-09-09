@@ -1508,6 +1508,9 @@ export async function runRootCommand(
 		}
 
 		const settingsInstance = await settingsPromise;
+		if (parsedArgs.vibe !== undefined) {
+			settingsInstance.override("vibe.defaultOnStartup", parsedArgs.vibe);
+		}
 		if (parsedArgs.approvalMode) {
 			// Runtime override (not persisted): every settings.get("tools.approvalMode") downstream
 			// sees this value. The wrapper still honours --auto-approve / --yolo on top of it.
