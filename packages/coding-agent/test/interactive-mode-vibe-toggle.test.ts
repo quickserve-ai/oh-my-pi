@@ -284,6 +284,31 @@ describe("InteractiveMode vibe mode toggle", () => {
 		}
 	});
 
+	it("completes a new session and reports a failed Vibe default without leaving hybrid tools", async () => {
+		session.settings.set("vibe.defaultOnStartup", true);
+		await mode.init({ suppressWelcomeIntro: true });
+		await mode.handleVibeModeCommand();
+		const sourceId = session.sessionId;
+		const notices: string[] = [];
+		const unsubscribe = session.subscribe(event => {
+			if (event.type === "notice" && event.level === "error") notices.push(event.message);
+		});
+		failVibePrompt = true;
+		try {
+			expect(await session.newSession()).toBe(true);
+			expect(session.sessionId).not.toBe(sourceId);
+			expect(mode.vibeModeEnabled).toBe(false);
+			expect(session.getAllToolNames().toSorted()).toEqual(["read", "todo"]);
+			expect(session.getActiveToolNames()).toEqual([]);
+			expect(notices).toEqual([expect.stringContaining("Vibe prompt refresh failed")]);
+			failVibePrompt = false;
+			await mode.handleVibeModeCommand();
+			expect(mode.vibeModeEnabled).toBe(true);
+		} finally {
+			unsubscribe();
+		}
+	});
+
 	it.each(["plan", "plan_paused"] as const)(
 		"preserves a restored %s instead of imposing the Vibe default",
 		async restoredMode => {

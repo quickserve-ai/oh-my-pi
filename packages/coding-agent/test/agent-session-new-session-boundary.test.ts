@@ -404,37 +404,45 @@ describe("AgentSession.newSession boundary", () => {
 		}
 	});
 
-	it("reports the replacement identity to session_switch extensions before /new returns", async () => {
-		let reported:
-			| {
-					reason: string;
-					sessionId: string;
-					sessionFile: string | undefined;
-			  }
-			| undefined;
-		const { session, sessionManager } = await createHarness({
-			extension: {
-				name: "observe-new-session",
-				register: pi => {
-					pi.on("session_switch", (event, ctx) => {
-						reported = {
-							reason: event.reason,
-							sessionId: ctx.sessionManager.getSessionId(),
-							sessionFile: ctx.sessionManager.getSessionFile(),
-						};
-					});
+	it.each([false, true])(
+		"reports the replacement identity to session_switch extensions (startup failure=%s)",
+		async failStartup => {
+			let reported:
+				| {
+						reason: string;
+						sessionId: string;
+						sessionFile: string | undefined;
+				  }
+				| undefined;
+			const { session, sessionManager } = await createHarness({
+				extension: {
+					name: "observe-new-session",
+					register: pi => {
+						pi.on("session_switch", (event, ctx) => {
+							reported = {
+								reason: event.reason,
+								sessionId: ctx.sessionManager.getSessionId(),
+								sessionFile: ctx.sessionManager.getSessionFile(),
+							};
+						});
+					},
 				},
-			},
-		});
-		const previousSessionId = sessionManager.getSessionId();
+			});
+			if (failStartup) {
+				session.setSessionSwitchReconciler(async () => {
+					throw new Error("startup mode unavailable");
+				});
+			}
+			const previousSessionId = sessionManager.getSessionId();
 
-		expect(await session.newSession()).toBe(true);
+			expect(await session.newSession()).toBe(true);
 
-		expect(reported?.reason).toBe("new");
-		expect(reported?.sessionId).toBe(sessionManager.getSessionId());
-		expect(reported?.sessionId).not.toBe(previousSessionId);
-		const reportedFile = reported?.sessionFile;
-		if (!reportedFile) throw new Error("Expected session_switch to report a persisted session file");
-		expect(await Bun.file(reportedFile).exists()).toBe(true);
-	});
+			expect(reported?.reason).toBe("new");
+			expect(reported?.sessionId).toBe(sessionManager.getSessionId());
+			expect(reported?.sessionId).not.toBe(previousSessionId);
+			const reportedFile = reported?.sessionFile;
+			if (!reportedFile) throw new Error("Expected session_switch to report a persisted session file");
+			expect(await Bun.file(reportedFile).exists()).toBe(true);
+		},
+	);
 });
