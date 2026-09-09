@@ -263,23 +263,31 @@ describe("InteractiveMode vibe mode toggle", () => {
 		}
 	});
 
-	it("rejects a switch whose default Vibe activation fails and restores ordinary tools", async () => {
+	it("completes a switch whose default Vibe activation fails with ordinary tools and an error notice", async () => {
 		session.settings.set("vibe.defaultOnStartup", true);
 		await mode.init({ suppressWelcomeIntro: true });
 		await mode.handleVibeModeCommand();
 		await session.sessionManager.ensureOnDisk();
-		const sourceFile = session.sessionFile;
 		const target = SessionManager.create(tempDir.path(), tempDir.path(), storage);
 		target.appendMessage({ role: "user", content: "target", timestamp: Date.now() });
 		await target.ensureOnDisk();
+		const notices: string[] = [];
+		const unsubscribe = session.subscribe(event => {
+			if (event.type === "notice" && event.level === "error") notices.push(event.message);
+		});
 		failVibePrompt = true;
 		try {
-			await expect(session.switchSession(target.getSessionFile()!)).rejects.toThrow("Vibe prompt refresh failed");
-			expect(session.sessionFile).toBe(sourceFile);
+			expect(await session.switchSession(target.getSessionFile()!)).toBe(true);
+			expect(session.sessionFile).toBe(target.getSessionFile());
 			expect(mode.vibeModeEnabled).toBe(false);
 			expect(session.getAllToolNames().toSorted()).toEqual(["read", "todo"]);
 			expect(session.getActiveToolNames()).toEqual([]);
+			expect(notices).toEqual([expect.stringContaining("Vibe prompt refresh failed")]);
+			failVibePrompt = false;
+			await mode.handleVibeModeCommand();
+			expect(mode.vibeModeEnabled).toBe(true);
 		} finally {
+			unsubscribe();
 			await target.close();
 		}
 	});

@@ -9810,12 +9810,15 @@ export class AgentSession {
 			try {
 				await this.#sessionSwitchReconciler?.({ applyStartupDefault: true });
 			} catch (error) {
-				// An opted-in director must not report a successful switch with
-				// ordinary tools after its startup mode failed to activate.
-				if (this.settings.get("vibe.defaultOnStartup") && this.#agentKind === "main") throw error;
 				logger.warn("Failed to reconcile session mode after switch", {
 					targetSessionFile: sessionPath,
 					error: String(error),
+				});
+				this.#emit({
+					type: "notice",
+					level: "error",
+					source: "session-mode",
+					message: `Session switched, but its startup mode failed: ${String(error)}`,
 				});
 			}
 			// Refresh the workspace-roots block to match the resumed session's directory set.
