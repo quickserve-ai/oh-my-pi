@@ -3429,7 +3429,15 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const sessionPromise = createAgentSession(buildSubagentSessionOptions(sessionManager, null));
 			let session: AgentSession;
 			try {
-				({ session } = await awaitAbortable(sessionPromise));
+				let sessionFallbackMessage: string | undefined;
+				({ session, modelFallbackMessage: sessionFallbackMessage } = await awaitAbortable(sessionPromise));
+				if (sessionFallbackMessage) {
+					logger.warn("Subagent session model fallback", {
+						id,
+						requested: modelPatterns,
+						message: sessionFallbackMessage,
+					});
+				}
 			} catch (err) {
 				// Abort raced session startup. The session may still resolve later
 				// holding live LSP/MCP child processes — dispose it when it does so

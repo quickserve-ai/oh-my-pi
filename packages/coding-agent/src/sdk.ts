@@ -2554,6 +2554,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				if (options.modelPatternAuthFallback) {
 					const primaryKey = await modelRegistry.getApiKey(primary.model);
 					if (primaryKey !== kNoAuth && !isAuthenticated(primaryKey)) {
+						if (settings.get("task.modelAuthFallback") === "fail") {
+							throw new Error(
+								`Model ${primary.model.provider}/${primary.model.id} has no working credentials and task.modelAuthFallback is "fail"; refusing to substitute another model.`,
+							);
+						}
 						const fallback = parseModelPattern(
 							options.modelPatternAuthFallback,
 							resolutionModels,

@@ -5132,6 +5132,31 @@ export const SETTINGS_SCHEMA = {
 		type: "record",
 		default: DEFAULT_AGENT_MODEL_OVERRIDES,
 	},
+	"task.modelAuthFallback": {
+		type: "enum",
+		values: ["parent", "fail"] as const,
+		default: "parent",
+		ui: {
+			tab: "tasks",
+			group: "Subagents",
+			label: "Model Auth Fallback",
+			description:
+				"What to do when a subagent's requested model has no working credentials at spawn time",
+			options: [
+				{
+					value: "parent",
+					label: "Parent model",
+					description: "Substitute the parent session's authenticated model (a warning is logged)",
+				},
+				{
+					value: "fail",
+					label: "Fail closed",
+					description:
+						"Refuse the spawn: a subagent never silently runs a different model than the one requested",
+				},
+			],
+		},
+	},
 	"task.agentPrewalk": {
 		type: "record",
 		default: {} as Record<string, string>,

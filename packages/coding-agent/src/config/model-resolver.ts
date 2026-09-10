@@ -1601,6 +1601,12 @@ export function resolveModelOverride(
  * If neither the subagent nor the parent has working auth, returns the
  * primary resolution unchanged so the existing error path still surfaces
  * a meaningful failure downstream.
+ *
+ * When `task.modelAuthFallback` is `"fail"`, the parent-model substitution
+ * is disabled entirely: a resolved model whose credential check fails
+ * throws instead of falling back, so a spawn can never silently run a
+ * different model than the one requested. The check runs even when no
+ * parent pattern is available, making the credential preflight uniform.
  */
 export async function resolveModelOverrideWithAuthFallback(
 	modelPatterns: string[],
@@ -1616,12 +1622,21 @@ export async function resolveModelOverrideWithAuthFallback(
 	warning?: string;
 }> {
 	const primary = resolveModelOverride(modelPatterns, modelRegistry, settings);
-	if (!primary.model || !parentActiveModelPattern) {
+	const authFallbackDisabled = settings?.get("task.modelAuthFallback") === "fail";
+	if (!primary.model || (!parentActiveModelPattern && !authFallbackDisabled)) {
 		return { ...primary, authFallbackUsed: false };
 	}
 
 	const primaryKey = await modelRegistry.getApiKey(primary.model, sessionId);
 	if (primaryKey === kNoAuth || isAuthenticated(primaryKey)) {
+		return { ...primary, authFallbackUsed: false };
+	}
+	if (authFallbackDisabled) {
+		throw new Error(
+			`Model ${primary.model.provider}/${primary.model.id} has no working credentials for this session and task.modelAuthFallback is "fail"; refusing to substitute another model.`,
+		);
+	}
+	if (!parentActiveModelPattern) {
 		return { ...primary, authFallbackUsed: false };
 	}
 
