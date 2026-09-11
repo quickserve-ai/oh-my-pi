@@ -5140,8 +5140,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "tasks",
 			group: "Subagents",
 			label: "Model Auth Fallback",
-			description:
-				"What to do when a subagent's requested model has no working credentials at spawn time",
+			description: "What to do when a subagent's requested model has no working credentials at spawn time",
 			options: [
 				{
 					value: "parent",
@@ -5151,8 +5150,7 @@ export const SETTINGS_SCHEMA = {
 				{
 					value: "fail",
 					label: "Fail closed",
-					description:
-						"Refuse the spawn: a subagent never silently runs a different model than the one requested",
+					description: "Refuse the spawn: a subagent never silently runs a different model than the one requested",
 				},
 			],
 		},

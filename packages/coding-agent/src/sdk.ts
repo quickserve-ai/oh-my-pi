@@ -2626,7 +2626,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				model = selectedModel;
 				initialRetryFallback =
 					retryFallback && usageFallbackTriggered ? { ...retryFallback, pinned: true } : retryFallback;
-				modelFallbackMessage = undefined;
+				// An auth-fallback substitution is surfaced to the caller instead of
+				// being silently cleared with the restore-failure message.
+				modelFallbackMessage = authFallbackUsed
+					? `Requested model ${primary.model.provider}/${primary.model.id} has no working credentials; using ${selectedModel.provider}/${selectedModel.id} instead (task.modelAuthFallback="parent")`
+					: undefined;
 				if (selectedExplicitThinkingLevel) {
 					restoredSessionThinkingLevel = selectedThinkingLevel;
 				}
