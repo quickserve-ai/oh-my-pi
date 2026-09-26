@@ -359,6 +359,59 @@ describe("InteractiveMode vibe mode toggle", () => {
 		expect(mode.vibeModeEnabled).toBe(true);
 	});
 
+	it("rolls back a Vibe default that fails after its tools were activated", async () => {
+		session.settings.set("vibe.defaultOnStartup", true);
+		await session.setActiveToolsByName(["read"]);
+		const toolsBefore = session.getEnabledToolNames().toSorted();
+		const appendModeChange = session.sessionManager.appendModeChange.bind(session.sessionManager);
+		vi.spyOn(session.sessionManager, "appendModeChange").mockImplementation((mode, data) => {
+			if (mode === "vibe") throw new Error("disk full");
+			return appendModeChange(mode, data);
+		});
+		const warning = vi.spyOn(mode, "showWarning");
+
+		await expect(mode.init({ suppressWelcomeIntro: true })).resolves.toBeUndefined();
+
+		expect(warning).toHaveBeenCalledWith(
+			expect.stringMatching(/^Vibe startup default failed: .*disk full.*; continuing in normal mode\.$/),
+		);
+		// The warning is only true once the late failure has been rolled back.
+		expect(mode.vibeModeEnabled).toBe(false);
+		expect(session.getVibeModeState()).toBeUndefined();
+		expect(session.getEnabledToolNames().toSorted()).toEqual(toolsBefore);
+		expect(session.getAllToolNames().toSorted()).toEqual(["read", "todo"]);
+		expect(vibeModeEntryCount(session.sessionManager)).toBe(0);
+	});
+
+	it("names the state left behind when a failed Vibe default cannot be rolled back", async () => {
+		session.settings.set("vibe.defaultOnStartup", true);
+		await session.setActiveToolsByName(["read"]);
+		const toolsBefore = session.getEnabledToolNames().toSorted();
+		const appendModeChange = session.sessionManager.appendModeChange.bind(session.sessionManager);
+		vi.spyOn(session.sessionManager, "appendModeChange").mockImplementation((mode, data) => {
+			if (mode === "vibe") throw new Error("disk full");
+			return appendModeChange(mode, data);
+		});
+		const deactivate = vi.spyOn(session, "deactivateVibeTools").mockRejectedValue(new Error("tool restore failed"));
+		const warning = vi.spyOn(mode, "showWarning");
+
+		await expect(mode.init({ suppressWelcomeIntro: true })).resolves.toBeUndefined();
+
+		expect(mode.vibeModeEnabled).toBe(true);
+		expect(warning).not.toHaveBeenCalledWith(expect.stringContaining("continuing in normal mode"));
+		expect(warning).toHaveBeenCalledWith(
+			expect.stringMatching(
+				/^Vibe startup default failed: .*disk full.*; rollback failed, Vibe mode is still active/,
+			),
+		);
+
+		// The named state is actionable: an explicit /vibe exit restores the toolset.
+		deactivate.mockRestore();
+		await mode.handleVibeModeCommand();
+		expect(mode.vibeModeEnabled).toBe(false);
+		expect(session.getEnabledToolNames().toSorted()).toEqual(toolsBefore);
+	});
+
 	it("keeps an explicit /vibe activation failure rejecting instead of downgrading it to a warning", async () => {
 		await mode.init({ suppressWelcomeIntro: true });
 		const warning = vi.spyOn(mode, "showWarning");

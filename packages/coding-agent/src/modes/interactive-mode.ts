@@ -5005,15 +5005,47 @@ export class InteractiveMode implements InteractiveModeContext {
 		) {
 			return;
 		}
-		// Only the default is best-effort: #enterVibeMode has already rolled the
-		// tools back, so the session continues as an ordinary one. An explicit
-		// /vibe keeps rejecting (and dropping its prompt) on the same failure.
+		// Only the default is best-effort: the session continues as an ordinary
+		// one. An explicit /vibe keeps rejecting (and dropping its prompt) on the
+		// same failure.
+		const previousTools = this.session.getEnabledToolNames();
 		try {
 			await this.#enterVibeMode();
 		} catch (error) {
-			logger.warn("Vibe startup default failed; continuing in normal mode", { error: String(error) });
-			this.showWarning(`Vibe startup default failed: ${String(error)}; continuing in normal mode.`);
+			logger.warn("Vibe startup default failed", { error: String(error) });
+			const leftBehind = await this.#rollBackFailedVibeDefault(previousTools);
+			this.showWarning(
+				leftBehind
+					? `Vibe startup default failed: ${String(error)}; rollback failed, ${leftBehind}.`
+					: `Vibe startup default failed: ${String(error)}; continuing in normal mode.`,
+			);
 		}
+	}
+
+	/**
+	 * #enterVibeMode only rolls back a failed tool activation; a later failure
+	 * (e.g. persisting the mode change) leaves Vibe active. Undo that through the
+	 * exit path. Returns the state left behind when ordinary tools are not back.
+	 */
+	async #rollBackFailedVibeDefault(previousTools: string[]): Promise<string | undefined> {
+		const toolsRestored = () => {
+			const current = new Set(this.session.getEnabledToolNames());
+			return current.size === previousTools.length && previousTools.every(name => current.has(name));
+		};
+		try {
+			if (this.vibeModeEnabled) {
+				await this.#exitVibeMode();
+			} else if (!toolsRestored()) {
+				await this.session.deactivateVibeTools(previousTools);
+			}
+		} catch (error) {
+			logger.warn("Vibe startup default rollback failed", { error: String(error) });
+		}
+		if (this.vibeModeEnabled) return "Vibe mode is still active (run /vibe to exit it)";
+		if (!toolsRestored()) {
+			return `Vibe mode is off but the toolset was not restored (enabled: ${this.session.getEnabledToolNames().join(", ") || "none"})`;
+		}
+		return undefined;
 	}
 
 	async #enterVibeMode(options?: { persistModeChange?: boolean; previousTools?: string[] }): Promise<void> {
