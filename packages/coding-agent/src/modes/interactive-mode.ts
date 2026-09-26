@@ -5005,7 +5005,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		) {
 			return;
 		}
-		await this.#enterVibeMode();
+		// Only the default is best-effort: #enterVibeMode has already rolled the
+		// tools back, so the session continues as an ordinary one. An explicit
+		// /vibe keeps rejecting (and dropping its prompt) on the same failure.
+		try {
+			await this.#enterVibeMode();
+		} catch (error) {
+			logger.warn("Vibe startup default failed; continuing in normal mode", { error: String(error) });
+			this.showWarning(`Vibe startup default failed: ${String(error)}; continuing in normal mode.`);
+		}
 	}
 
 	async #enterVibeMode(options?: { persistModeChange?: boolean; previousTools?: string[] }): Promise<void> {
@@ -6574,7 +6582,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	#vibeSessionTransitionBlocked(): boolean {
-		if (!this.vibeModeEnabled) return false;
+		// vibeModeEnabled is still false while activation (or its rollback) is
+		// in flight; a transition must not run concurrently with that switch.
+		if (!this.vibeModeEnabled && this.#vibeModeEntry === undefined) return false;
 		this.showWarning("Exit vibe mode first.");
 		return true;
 	}

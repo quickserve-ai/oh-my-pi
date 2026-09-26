@@ -263,7 +263,7 @@ describe("InteractiveMode vibe mode toggle", () => {
 		}
 	});
 
-	it("completes a switch whose default Vibe activation fails with ordinary tools and an error notice", async () => {
+	it("completes a switch whose default Vibe activation fails with ordinary tools and a warning", async () => {
 		session.settings.set("vibe.defaultOnStartup", true);
 		await mode.init({ suppressWelcomeIntro: true });
 		await mode.handleVibeModeCommand();
@@ -275,6 +275,7 @@ describe("InteractiveMode vibe mode toggle", () => {
 		const unsubscribe = session.subscribe(event => {
 			if (event.type === "notice" && event.level === "error") notices.push(event.message);
 		});
+		const warning = vi.spyOn(mode, "showWarning");
 		failVibePrompt = true;
 		try {
 			expect(await session.switchSession(target.getSessionFile()!)).toBe(true);
@@ -282,7 +283,15 @@ describe("InteractiveMode vibe mode toggle", () => {
 			expect(mode.vibeModeEnabled).toBe(false);
 			expect(session.getAllToolNames().toSorted()).toEqual(["read", "todo"]);
 			expect(session.getActiveToolNames()).toEqual([]);
-			expect(notices).toEqual([expect.stringContaining("Vibe prompt refresh failed")]);
+			expect(vibeModeEntryCount(session.sessionManager)).toBe(0);
+			// The default's own failure is caught by the default policy; the
+			// session-mode error notice stays reserved for reconcile failures.
+			expect(notices).toEqual([]);
+			expect(warning).toHaveBeenCalledWith(
+				expect.stringMatching(
+					/^Vibe startup default failed: .*Vibe prompt refresh failed.*; continuing in normal mode\.$/,
+				),
+			);
 			failVibePrompt = false;
 			await mode.handleVibeModeCommand();
 			expect(mode.vibeModeEnabled).toBe(true);
@@ -301,6 +310,7 @@ describe("InteractiveMode vibe mode toggle", () => {
 		const unsubscribe = session.subscribe(event => {
 			if (event.type === "notice" && event.level === "error") notices.push(event.message);
 		});
+		const warning = vi.spyOn(mode, "showWarning");
 		failVibePrompt = true;
 		try {
 			expect(await session.newSession()).toBe(true);
@@ -308,7 +318,13 @@ describe("InteractiveMode vibe mode toggle", () => {
 			expect(mode.vibeModeEnabled).toBe(false);
 			expect(session.getAllToolNames().toSorted()).toEqual(["read", "todo"]);
 			expect(session.getActiveToolNames()).toEqual([]);
-			expect(notices).toEqual([expect.stringContaining("Vibe prompt refresh failed")]);
+			expect(vibeModeEntryCount(session.sessionManager)).toBe(0);
+			expect(notices).toEqual([]);
+			expect(warning).toHaveBeenCalledWith(
+				expect.stringMatching(
+					/^Vibe startup default failed: .*Vibe prompt refresh failed.*; continuing in normal mode\.$/,
+				),
+			);
 			failVibePrompt = false;
 			await mode.handleVibeModeCommand();
 			expect(mode.vibeModeEnabled).toBe(true);
@@ -316,6 +332,78 @@ describe("InteractiveMode vibe mode toggle", () => {
 			unsubscribe();
 		}
 	});
+
+	it("continues cold start as an ordinary session when the Vibe default fails to activate", async () => {
+		session.settings.set("vibe.defaultOnStartup", true);
+		await session.setActiveToolsByName(["read"]);
+		const toolsBefore = session.getEnabledToolNames();
+		const warning = vi.spyOn(mode, "showWarning");
+		failVibePrompt = true;
+
+		await expect(mode.init({ suppressWelcomeIntro: true })).resolves.toBeUndefined();
+
+		expect(mode.vibeModeEnabled).toBe(false);
+		expect(session.getVibeModeState()).toBeUndefined();
+		expect(session.getEnabledToolNames()).toEqual(toolsBefore);
+		expect(session.getAllToolNames().toSorted()).toEqual(["read", "todo"]);
+		expect(vibeModeEntryCount(session.sessionManager)).toBe(0);
+		expect(warning).toHaveBeenCalledWith(
+			expect.stringMatching(
+				/^Vibe startup default failed: .*Vibe prompt refresh failed.*; continuing in normal mode\.$/,
+			),
+		);
+
+		// The session stays usable: an explicit /vibe still enters normally.
+		failVibePrompt = false;
+		await mode.handleVibeModeCommand();
+		expect(mode.vibeModeEnabled).toBe(true);
+	});
+
+	it("keeps an explicit /vibe activation failure rejecting instead of downgrading it to a warning", async () => {
+		await mode.init({ suppressWelcomeIntro: true });
+		const warning = vi.spyOn(mode, "showWarning");
+		failVibePrompt = true;
+
+		await expect(mode.handleVibeModeCommand("dropped prompt")).rejects.toThrow("Vibe prompt refresh failed");
+
+		expect(mode.vibeModeEnabled).toBe(false);
+		expect(session.getActiveToolNames()).toEqual([]);
+		expect(warning).not.toHaveBeenCalledWith(expect.stringContaining("Vibe startup default failed"));
+	});
+
+	it.each(["activation", "rollback"] as const)(
+		"refuses session transitions while Vibe %s is in flight",
+		async phase => {
+			await mode.init({ suppressWelcomeIntro: true });
+			const gate = Promise.withResolvers<void>();
+			if (phase === "activation") {
+				vi.spyOn(session, "activateVibeTools").mockImplementation(() => gate.promise);
+			} else {
+				vi.spyOn(session, "activateVibeTools").mockRejectedValue(new Error("activation failed"));
+				const deactivate = session.deactivateVibeTools.bind(session);
+				vi.spyOn(session, "deactivateVibeTools").mockImplementation(async tools => {
+					await gate.promise;
+					await deactivate(tools);
+				});
+			}
+			const newSession = vi.spyOn(session, "newSession");
+			const warning = vi.spyOn(mode, "showWarning");
+			const sourceId = session.sessionId;
+
+			const entering = mode.handleVibeModeCommand().catch(error => error);
+			for (let index = 0; index < 5; index++) await Promise.resolve();
+			expect(mode.vibeModeEnabled).toBe(false);
+
+			await mode.handleClearCommand();
+			expect(warning).toHaveBeenCalledWith("Exit vibe mode first.");
+			expect(newSession).not.toHaveBeenCalled();
+			expect(session.sessionId).toBe(sourceId);
+
+			gate.resolve();
+			await entering;
+			expect(session.sessionId).toBe(sourceId);
+		},
+	);
 
 	it.each(["plan", "plan_paused"] as const)(
 		"preserves a restored %s instead of imposing the Vibe default",

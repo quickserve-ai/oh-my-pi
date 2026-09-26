@@ -38,7 +38,7 @@ Workers, headless print/RPC/SDK sessions, and `omp render` transcript replays do
 
 `/vibe` can still exit for the current session. The default applies again on the next launch or session transition, even if the resumed session last recorded an explicit Vibe exit. Exit Vibe before `/new`, fork, move, or handoff; the setting does not bypass worker cleanup or those transition guards.
 
-If default activation fails after `/new` or a successful session switch has committed its transcript, the completed transition remains valid and an error notice reports the mode failure. The `/new` lifecycle hook still runs. Failed activation removes the transient Vibe tools; retry `/vibe` after resolving the error. A switch rejected or rolled back for another reason does not reapply the startup default to the original session.
+If default activation fails at launch, or after `/new` or a successful session switch has committed its transcript, the session continues in normal mode with its previous toolset and a warning reports the failure; the completed transition remains valid and the `/new` lifecycle hook still runs. Failed activation removes the transient Vibe tools; retry `/vibe` after resolving the error. An explicit `/vibe` whose activation fails still fails and drops its prompt. A switch rejected or rolled back for another reason does not reapply the startup default to the original session.
 
 ## The two worker tiers
 
