@@ -34,7 +34,7 @@ Use `--vibe` or `--no-vibe` for a runtime-only override. CLI flags take preceden
 
 The setting is opt-in. It enters Vibe before the first task turn of a top-level interactive session, including ordinary resumed sessions, session switches, and new sessions. It takes precedence over `plan.defaultOnStartup` on a fresh launch, but never replaces an active or paused plan or goal. Persisted Vibe sessions keep the normal restoration and worker-rehydration behavior.
 
-Workers, headless print/RPC/SDK sessions, and `omp render` transcript replays do not inherit director mode from this setting. Tool-approval settings and provider safety checks are independent and unchanged.
+Workers, headless print/RPC/SDK sessions, and `omp render` transcript replays do not inherit director mode from this setting. `omp render` also replays a session persisted in Vibe without entering Vibe. Tool-approval settings and provider safety checks are independent and unchanged.
 
 `/vibe` can still exit for the current session. The default applies again on the next launch or session transition, even if the resumed session last recorded an explicit Vibe exit. Exit Vibe before `/new`, fork, move, or handoff; the setting does not bypass worker cleanup or those transition guards.
 
