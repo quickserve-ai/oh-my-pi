@@ -22,7 +22,11 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm, VIBE_MODE_CONTEXT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { FileSessionStorage, type WriteTextAtomicOptions } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import {
+	FileSessionStorage,
+	type SessionStorageWriter,
+	type WriteTextAtomicOptions,
+} from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { VIBE_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/tools/vibe";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { VibeSessionRegistry } from "@oh-my-pi/pi-coding-agent/vibe/runtime";
@@ -103,6 +107,27 @@ function armOrderLoop(
 
 class ExitFaultStorage extends FileSessionStorage {
 	failNextAtomicWrite = false;
+	/** Fail every synchronous journal write (append or full rewrite) with ENOSPC. */
+	failSyncWrites = false;
+	readonly failedSyncWrites: string[] = [];
+
+	#enospc(content: string): never {
+		this.failedSyncWrites.push(content);
+		throw Object.assign(new Error("no space left on device"), { code: "ENOSPC" });
+	}
+
+	override openWriter(...args: Parameters<FileSessionStorage["openWriter"]>): SessionStorageWriter {
+		const writer = super.openWriter(...args);
+		const appendSync = writer.appendSync?.bind(writer);
+		if (!appendSync) return writer;
+		writer.appendSync = (line: string) => (this.failSyncWrites ? this.#enospc(line) : appendSync(line));
+		return writer;
+	}
+
+	override writeTextSync(...args: Parameters<FileSessionStorage["writeTextSync"]>): void {
+		if (this.failSyncWrites) this.#enospc(args[1]);
+		super.writeTextSync(...args);
+	}
 	#readGate:
 		| {
 				filePath: string;
@@ -359,13 +384,17 @@ describe("InteractiveMode vibe mode toggle", () => {
 		expect(mode.vibeModeEnabled).toBe(true);
 	});
 
-	it("rolls back a Vibe default that fails after its tools were activated", async () => {
+	// Synthetic seam: production appendModeChange never throws (a storage failure
+	// is latched and the entry stays in memory; see the ENOSPC test below). The
+	// throw stands in for any exception after the Vibe tools are live, which is
+	// what the default's own rollback must undo.
+	it("rolls back a Vibe default hit by a late exception after its tools were activated", async () => {
 		session.settings.set("vibe.defaultOnStartup", true);
 		await session.setActiveToolsByName(["read"]);
 		const toolsBefore = session.getEnabledToolNames().toSorted();
 		const appendModeChange = session.sessionManager.appendModeChange.bind(session.sessionManager);
 		vi.spyOn(session.sessionManager, "appendModeChange").mockImplementation((mode, data) => {
-			if (mode === "vibe") throw new Error("disk full");
+			if (mode === "vibe") throw new Error("late exception");
 			return appendModeChange(mode, data);
 		});
 		const warning = vi.spyOn(mode, "showWarning");
@@ -373,7 +402,7 @@ describe("InteractiveMode vibe mode toggle", () => {
 		await expect(mode.init({ suppressWelcomeIntro: true })).resolves.toBeUndefined();
 
 		expect(warning).toHaveBeenCalledWith(
-			expect.stringMatching(/^Vibe startup default failed: .*disk full.*; continuing in normal mode\.$/),
+			expect.stringMatching(/^Vibe startup default failed: .*late exception.*; continuing in normal mode\.$/),
 		);
 		// The warning is only true once the late failure has been rolled back.
 		expect(mode.vibeModeEnabled).toBe(false);
@@ -383,13 +412,13 @@ describe("InteractiveMode vibe mode toggle", () => {
 		expect(vibeModeEntryCount(session.sessionManager)).toBe(0);
 	});
 
-	it("names the state left behind when a failed Vibe default cannot be rolled back", async () => {
+	it("names the state left behind when a Vibe default's late exception cannot be rolled back", async () => {
 		session.settings.set("vibe.defaultOnStartup", true);
 		await session.setActiveToolsByName(["read"]);
 		const toolsBefore = session.getEnabledToolNames().toSorted();
 		const appendModeChange = session.sessionManager.appendModeChange.bind(session.sessionManager);
 		vi.spyOn(session.sessionManager, "appendModeChange").mockImplementation((mode, data) => {
-			if (mode === "vibe") throw new Error("disk full");
+			if (mode === "vibe") throw new Error("late exception");
 			return appendModeChange(mode, data);
 		});
 		const deactivate = vi.spyOn(session, "deactivateVibeTools").mockRejectedValue(new Error("tool restore failed"));
@@ -401,7 +430,7 @@ describe("InteractiveMode vibe mode toggle", () => {
 		expect(warning).not.toHaveBeenCalledWith(expect.stringContaining("continuing in normal mode"));
 		expect(warning).toHaveBeenCalledWith(
 			expect.stringMatching(
-				/^Vibe startup default failed: .*disk full.*; rollback failed, Vibe mode is still active/,
+				/^Vibe startup default failed: .*late exception.*; rollback failed, Vibe mode is still active/,
 			),
 		);
 
@@ -410,6 +439,102 @@ describe("InteractiveMode vibe mode toggle", () => {
 		await mode.handleVibeModeCommand();
 		expect(mode.vibeModeEnabled).toBe(false);
 		expect(session.getEnabledToolNames().toSorted()).toEqual(toolsBefore);
+	});
+
+	it("keeps the Vibe default active when persisting its mode change hits a full disk", async () => {
+		session.settings.set("vibe.defaultOnStartup", true);
+		session.sessionManager.appendMessage({ role: "user", content: "prior work", timestamp: Date.now() });
+		session.sessionManager.appendModeChange("none");
+		await session.sessionManager.ensureOnDisk();
+		const warning = vi.spyOn(mode, "showWarning");
+		// The disk is full exactly while the real append persists the Vibe entry.
+		const appendModeChange = session.sessionManager.appendModeChange.bind(session.sessionManager);
+		vi.spyOn(session.sessionManager, "appendModeChange").mockImplementation((mode, data) => {
+			storage.failSyncWrites = mode === "vibe";
+			try {
+				return appendModeChange(mode, data);
+			} finally {
+				storage.failSyncWrites = false;
+			}
+		});
+
+		await expect(mode.init({ suppressWelcomeIntro: true })).resolves.toBeUndefined();
+
+		// The real disk failure hit the Vibe mode_change write itself...
+		expect(storage.failedSyncWrites.some(line => /"type":"mode_change".*"mode":"vibe"/.test(line))).toBe(true);
+		// ...and is not an activation failure: the entry stays in memory for the
+		// next rewrite, so Vibe is on and no rollback or warning happens.
+		expect(mode.vibeModeEnabled).toBe(true);
+		expect(vibeModeEntryCount(session.sessionManager)).toBe(1);
+		expect(warning).not.toHaveBeenCalledWith(expect.stringContaining("Vibe startup default failed"));
+		expect(warning).toHaveBeenCalledWith(
+			expect.stringContaining("Session persistence failed: no space left on device"),
+		);
+
+		// Once space returns, the next entry rewrites the journal, Vibe entry included.
+		session.sessionManager.appendMessage({ role: "user", content: "after recovery", timestamp: Date.now() });
+		expect(await Bun.file(session.sessionFile!).text()).toMatch(/"type":"mode_change".*"mode":"vibe"/);
+	});
+
+	it("keeps the plan startup default out after a failed Vibe default promised normal mode", async () => {
+		session.settings.set("vibe.defaultOnStartup", true);
+		session.settings.set("plan.defaultOnStartup", true);
+		const warning = vi.spyOn(mode, "showWarning");
+		failVibePrompt = true;
+
+		await mode.init({ suppressWelcomeIntro: true });
+
+		expect(warning).toHaveBeenCalledWith(
+			expect.stringMatching(/^Vibe startup default failed: .*; continuing in normal mode\.$/),
+		);
+		expect(mode.vibeModeEnabled).toBe(false);
+		expect(mode.planModeEnabled).toBe(false);
+		expect(mode.planModePaused).toBe(false);
+	});
+
+	it("holds session transitions through the Vibe default's own rollback", async () => {
+		await mode.init({ suppressWelcomeIntro: true });
+		session.settings.set("vibe.defaultOnStartup", true);
+		// Activation installs the Vibe tools and then fails, and #enterVibeMode's
+		// own cleanup fails too: the default's second rollback is what restores
+		// the tools, after the entry promise is gone and Vibe is still off.
+		const activate = session.activateVibeTools.bind(session);
+		vi.spyOn(session, "activateVibeTools").mockImplementation(async names => {
+			await activate(names);
+			throw new Error("late activation failure");
+		});
+		const deactivate = session.deactivateVibeTools.bind(session);
+		const secondCleanup = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let cleanups = 0;
+		vi.spyOn(session, "deactivateVibeTools").mockImplementation(async tools => {
+			cleanups++;
+			if (cleanups === 1) throw new Error("first cleanup failed");
+			secondCleanup.resolve();
+			await release.promise;
+			await deactivate(tools);
+		});
+		const sourceId = session.sessionId;
+
+		const first = session.newSession();
+		await secondCleanup.promise;
+		expect(mode.vibeModeEnabled).toBe(false);
+		expect(session.getAllToolNames()).toContain("vibe_spawn");
+
+		const newSession = vi.spyOn(session, "newSession").mockResolvedValue(false);
+		const warning = vi.spyOn(mode, "showWarning");
+		await mode.handleClearCommand();
+		expect(warning).toHaveBeenCalledWith("Exit vibe mode first.");
+		expect(newSession).not.toHaveBeenCalled();
+
+		release.resolve();
+		expect(await first).toBe(true);
+		expect(session.sessionId).not.toBe(sourceId);
+		expect(mode.vibeModeEnabled).toBe(false);
+		expect(session.getAllToolNames().toSorted()).toEqual(["read", "todo"]);
+		expect(warning).toHaveBeenCalledWith(
+			expect.stringMatching(/^Vibe startup default failed: .*; continuing in normal mode\.$/),
+		);
 	});
 
 	it("keeps an explicit /vibe activation failure rejecting instead of downgrading it to a warning", async () => {
