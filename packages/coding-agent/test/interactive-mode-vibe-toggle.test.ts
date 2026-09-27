@@ -13,9 +13,12 @@ import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool, type StreamFn } from "@oh-my-pi/pi-agent-core";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
+import * as loopCondition from "@oh-my-pi/pi-coding-agent/modes/loop-condition";
+import type { LoopConditionVerdict } from "@oh-my-pi/pi-coding-agent/modes/loop-condition";
+import type { SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -492,15 +495,21 @@ describe("InteractiveMode vibe mode toggle", () => {
 		expect(mode.planModePaused).toBe(false);
 	});
 
-	it("holds session transitions through the Vibe default's own rollback", async () => {
-		await mode.init({ suppressWelcomeIntro: true });
+	/**
+	 * Drives the Vibe startup default through /new into its own second cleanup
+	 * and holds it there. Activation installs the Vibe tools and then fails, and
+	 * #enterVibeMode's own cleanup fails too, so the default's rollback is what
+	 * restores the tools — after the entry promise is gone and Vibe is still off.
+	 */
+	async function holdDefaultInSecondCleanup(): Promise<{
+		first: Promise<boolean>;
+		release: () => void;
+		activate: ReturnType<typeof vi.spyOn>;
+	}> {
 		session.settings.set("vibe.defaultOnStartup", true);
-		// Activation installs the Vibe tools and then fails, and #enterVibeMode's
-		// own cleanup fails too: the default's second rollback is what restores
-		// the tools, after the entry promise is gone and Vibe is still off.
-		const activate = session.activateVibeTools.bind(session);
-		vi.spyOn(session, "activateVibeTools").mockImplementation(async names => {
-			await activate(names);
+		const realActivate = session.activateVibeTools.bind(session);
+		const activate = vi.spyOn(session, "activateVibeTools").mockImplementation(async names => {
+			await realActivate(names);
 			throw new Error("late activation failure");
 		});
 		const deactivate = session.deactivateVibeTools.bind(session);
@@ -514,12 +523,17 @@ describe("InteractiveMode vibe mode toggle", () => {
 			await release.promise;
 			await deactivate(tools);
 		});
-		const sourceId = session.sessionId;
-
 		const first = session.newSession();
 		await secondCleanup.promise;
 		expect(mode.vibeModeEnabled).toBe(false);
 		expect(session.getAllToolNames()).toContain("vibe_spawn");
+		return { first, release: release.resolve, activate };
+	}
+
+	it("holds session transitions through the Vibe default's own rollback", async () => {
+		await mode.init({ suppressWelcomeIntro: true });
+		const sourceId = session.sessionId;
+		const { first, release } = await holdDefaultInSecondCleanup();
 
 		const newSession = vi.spyOn(session, "newSession").mockResolvedValue(false);
 		const warning = vi.spyOn(mode, "showWarning");
@@ -527,7 +541,7 @@ describe("InteractiveMode vibe mode toggle", () => {
 		expect(warning).toHaveBeenCalledWith("Exit vibe mode first.");
 		expect(newSession).not.toHaveBeenCalled();
 
-		release.resolve();
+		release();
 		expect(await first).toBe(true);
 		expect(session.sessionId).not.toBe(sourceId);
 		expect(mode.vibeModeEnabled).toBe(false);
@@ -536,6 +550,77 @@ describe("InteractiveMode vibe mode toggle", () => {
 			expect.stringMatching(/^Vibe startup default failed: .*; continuing in normal mode\.$/),
 		);
 	});
+
+	it("rejects an explicit /vibe while the Vibe default is still rolling back", async () => {
+		await mode.init({ suppressWelcomeIntro: true });
+		const { first, release, activate } = await holdDefaultInSecondCleanup();
+
+		const vibe = mode.handleVibeModeCommand("wait for vibe").then(
+			() => undefined,
+			(error: unknown) => error,
+		);
+		for (let index = 0; index < 5; index++) await Promise.resolve();
+		// No second entry may snapshot the unsettled toolset.
+		expect(activate).toHaveBeenCalledTimes(1);
+
+		release();
+		expect(await first).toBe(true);
+		const error = await vibe;
+		expect(error).toBeInstanceOf(Error);
+		expect(String(error)).toContain("Vibe startup default is still being applied");
+		expect(mode.vibeModeEnabled).toBe(false);
+		expect(session.getAllToolNames().toSorted()).toEqual(["read", "todo"]);
+	});
+
+	it.each(["before", "after"] as const)(
+		"disables a reset loop whose iteration meets the Vibe default's rollback %s its condition",
+		async phase => {
+			await mode.init({ suppressWelcomeIntro: true });
+			settings.set("loop.mode", "reset");
+			const condition = Promise.withResolvers<LoopConditionVerdict>();
+			if (phase === "after") {
+				vi.spyOn(loopCondition, "evaluateLoopCondition").mockImplementation(async () => await condition.promise);
+				mode.loopCondition = { command: "sleep 30", until: false };
+			}
+			const clear = vi.spyOn(mode, "handleClearCommand");
+			const showStatus = vi.spyOn(mode, "showStatus");
+			const resolved: SubmittedUserInput[] = [];
+			const arm = () => {
+				mode.loopModeEnabled = true;
+				mode.loopPrompt = "reset me";
+				const pending = mode.getUserInput();
+				void pending.then(input => resolved.push(input));
+			};
+			let held: Awaited<ReturnType<typeof holdDefaultInSecondCleanup>> | undefined;
+			try {
+				if (phase === "before") {
+					held = await holdDefaultInSecondCleanup();
+					arm();
+					await Bun.sleep(900);
+				} else {
+					// The iteration passes the pre-condition guard with no Vibe
+					// transition in flight, then the condition resolves mid-rollback.
+					arm();
+					await Bun.sleep(900);
+					held = await holdDefaultInSecondCleanup();
+					condition.resolve({ kind: "continue" });
+					for (let index = 0; index < 5; index++) await Promise.resolve();
+				}
+
+				expect(clear).not.toHaveBeenCalled();
+				expect(resolved).toHaveLength(0);
+				expect(mode.loopModeEnabled).toBe(false);
+				expect(showStatus).toHaveBeenCalledWith("Exit vibe mode before using reset loops. Loop mode disabled.");
+			} finally {
+				mode.disableLoopMode("Loop mode disabled.");
+				mode.cancelPendingSubmission();
+				mode.onInputCallback?.({ text: "", cancelled: true, started: false });
+				condition.resolve({ kind: "continue" });
+				held?.release();
+				await held?.first;
+			}
+		},
+	);
 
 	it("keeps an explicit /vibe activation failure rejecting instead of downgrading it to a warning", async () => {
 		await mode.init({ suppressWelcomeIntro: true });

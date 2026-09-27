@@ -2332,7 +2332,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 
-		if (action === "reset" && (this.vibeModeEnabled || this.#vibeModeEntry !== undefined)) {
+		if (
+			action === "reset" &&
+			(this.vibeModeEnabled || this.#vibeModeEntry !== undefined || this.#vibeDefaultTransition !== undefined)
+		) {
 			this.disableLoopMode("Exit vibe mode before using reset loops. Loop mode disabled.");
 			return;
 		}
@@ -2362,9 +2365,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		// /vibe can be enabled while the gate was awaiting: the pre-gate guard
 		// above is stale, and handleClearCommand would only warn and then let
 		// the iteration submit without resetting. Check the entering transition
-		// too: vibeModeEnabled is still false while activateVibeTools is in
-		// flight, but the reset must not run concurrently with the toolset switch.
-		if (action === "reset" && (this.vibeModeEnabled || this.#vibeModeEntry !== undefined)) {
+		// too: vibeModeEnabled is still false while activateVibeTools (or the
+		// startup default's rollback) is in flight, but the reset must not run
+		// concurrently with the toolset switch.
+		if (
+			action === "reset" &&
+			(this.vibeModeEnabled || this.#vibeModeEntry !== undefined || this.#vibeDefaultTransition !== undefined)
+		) {
 			this.disableLoopMode("Exit vibe mode before using reset loops. Loop mode disabled.");
 			return;
 		}
@@ -4884,6 +4891,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		initialPrompt?: string,
 		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
 	): Promise<boolean> {
+		// The startup default's attempt (including its own rollback) owns the
+		// toolset until it settles; a /vibe now would snapshot unsettled tools.
+		// Reject rather than wait: the caller keeps the command draft.
+		if (this.#vibeDefaultTransition !== undefined) {
+			throw new Error("Vibe startup default is still being applied; retry /vibe when it finishes.");
+		}
 		if (this.vibeModeEnabled) {
 			await this.#exitVibeMode();
 			return false;
