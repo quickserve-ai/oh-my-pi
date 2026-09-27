@@ -35,6 +35,7 @@ export interface Args {
 	smol?: string;
 	slow?: string;
 	plan?: string;
+	vibe?: boolean;
 	prewalk?: boolean;
 	noPrewalk?: boolean;
 	prewalkInto?: string;
@@ -259,6 +260,10 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.advisor = true;
 		} else if (arg === "--external-thinking") {
 			result.externalThinking = true;
+		} else if (arg === "--vibe") {
+			result.vibe = true;
+		} else if (arg === "--no-vibe") {
+			result.vibe = false;
 		} else if (arg === "--prewalk") {
 			result.prewalk = true;
 		} else if (arg === "--no-prewalk") {

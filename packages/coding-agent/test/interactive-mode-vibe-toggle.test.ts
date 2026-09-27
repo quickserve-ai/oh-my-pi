@@ -7,22 +7,31 @@
  * 3. Exiting unregisters the vibe tools and restores the pre-vibe active toolset
  *    exactly, including the legitimate empty set.
  */
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool, type StreamFn } from "@oh-my-pi/pi-agent-core";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/extensibility/skills";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
+import * as loopCondition from "@oh-my-pi/pi-coding-agent/modes/loop-condition";
+import type { LoopConditionVerdict } from "@oh-my-pi/pi-coding-agent/modes/loop-condition";
+import type { SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { initTheme } from "@oh-my-pi/pi-tui/theme";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm, VIBE_MODE_CONTEXT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { FileSessionStorage, type WriteTextAtomicOptions } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
+import {
+	FileSessionStorage,
+	type SessionStorageWriter,
+	type WriteTextAtomicOptions,
+} from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { VIBE_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/tools/vibe";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { VibeSessionRegistry } from "@oh-my-pi/pi-coding-agent/vibe/runtime";
@@ -101,8 +110,36 @@ function armOrderLoop(
 	return { done, order };
 }
 
+/** The Vibe startup default held inside its own second cleanup (see holdDefaultInSecondCleanup). */
+interface HeldDefaultRollback {
+	first: Promise<boolean>;
+	release: () => void;
+	activate: Mock<AgentSession["activateVibeTools"]>;
+}
+
 class ExitFaultStorage extends FileSessionStorage {
 	failNextAtomicWrite = false;
+	/** Fail every synchronous journal write (append or full rewrite) with ENOSPC. */
+	failSyncWrites = false;
+	readonly failedSyncWrites: string[] = [];
+
+	#enospc(content: string): never {
+		this.failedSyncWrites.push(content);
+		throw Object.assign(new Error("no space left on device"), { code: "ENOSPC" });
+	}
+
+	override openWriter(...args: Parameters<FileSessionStorage["openWriter"]>): SessionStorageWriter {
+		const writer = super.openWriter(...args);
+		const appendSync = writer.appendSync?.bind(writer);
+		if (!appendSync) return writer;
+		writer.appendSync = (line: string) => (this.failSyncWrites ? this.#enospc(line) : appendSync(line));
+		return writer;
+	}
+
+	override writeTextSync(...args: Parameters<FileSessionStorage["writeTextSync"]>): void {
+		if (this.failSyncWrites) this.#enospc(args[1]);
+		super.writeTextSync(...args);
+	}
 	#readGate:
 		| {
 				filePath: string;
@@ -145,6 +182,7 @@ describe("InteractiveMode vibe mode toggle", () => {
 	let mode: InteractiveMode;
 	let modelRegistry: ModelRegistry;
 	let storage: ExitFaultStorage;
+	let failVibePrompt = false;
 
 	beforeAll(async () => {
 		await initTheme();
@@ -154,6 +192,7 @@ describe("InteractiveMode vibe mode toggle", () => {
 	});
 
 	beforeEach(async () => {
+		failVibePrompt = false;
 		resetSettingsForTest();
 		VibeSessionRegistry.resetGlobalForTests();
 		await Settings.init({ inMemory: true, cwd: tempDir.path() });
@@ -185,6 +224,12 @@ describe("InteractiveMode vibe mode toggle", () => {
 			toolRegistry: new Map(registryTools.map(tool => [tool.name, tool])),
 			builtInToolNames: registryTools.map(tool => tool.name),
 			createVibeTools: () => VIBE_TOOL_NAMES.map(stubTool),
+			rebuildSystemPrompt: async toolNames => {
+				if (failVibePrompt && toolNames.includes("vibe_spawn")) {
+					throw new Error("Vibe prompt refresh failed");
+				}
+				return { systemPrompt: ["Test"] };
+			},
 		});
 		mode = new InteractiveMode(session, "test", undefined, undefined, undefined, undefined, new EventBus());
 	});
@@ -200,6 +245,538 @@ describe("InteractiveMode vibe mode toggle", () => {
 	afterAll(() => {
 		authStorage.close();
 		tempDir.removeSync();
+	});
+
+	it("starts a fresh parent in Vibe before its first turn, ahead of the plan startup default", async () => {
+		session.settings.set("vibe.defaultOnStartup", true);
+		session.settings.set("plan.defaultOnStartup", true);
+		await mode.init({ suppressWelcomeIntro: true });
+
+		expect(mode.vibeModeEnabled).toBe(true);
+		expect(mode.planModeEnabled).toBe(false);
+		expect(session.getActiveToolNames().toSorted()).toEqual(["read", "todo", ...VIBE_TOOL_NAMES].toSorted());
+		await mode.handleVibeModeCommand();
+		expect(session.getActiveToolNames()).toEqual([]);
+		expect(session.getAllToolNames().toSorted()).toEqual(["read", "todo"]);
+	});
+
+	it("defaults resumed ordinary parents and new sessions to Vibe without duplicating persisted entries", async () => {
+		session.settings.set("vibe.defaultOnStartup", true);
+		session.sessionManager.appendMessage({ role: "user", content: "prior work", timestamp: Date.now() });
+		session.sessionManager.appendModeChange("none");
+		await mode.init({ suppressWelcomeIntro: true });
+		expect(mode.vibeModeEnabled).toBe(true);
+		await session.sessionManager.ensureOnDisk();
+		const file = session.sessionFile!;
+		await session.switchSession(file);
+		expect(mode.vibeModeEnabled).toBe(true);
+		expect(vibeModeEntryCount(session.sessionManager)).toBe(1);
+
+		// Default entry must not bypass the existing worker/lifecycle safety gate.
+		await expect(session.newSession()).rejects.toThrow("Exit vibe mode first");
+		await mode.handleVibeModeCommand();
+		await session.newSession();
+		expect(mode.vibeModeEnabled).toBe(true);
+		expect(session.getActiveToolNames().toSorted()).toEqual(["read", "todo", ...VIBE_TOOL_NAMES].toSorted());
+	});
+
+	it("keeps an explicit Vibe exit effective when a session switch is rejected", async () => {
+		session.settings.set("vibe.defaultOnStartup", true);
+		await mode.init({ suppressWelcomeIntro: true });
+		await mode.handleVibeModeCommand();
+		await session.sessionManager.ensureOnDisk();
+		const sourceFile = session.sessionFile;
+		const target = SessionManager.create(path.join(tempDir.path(), "elsewhere"), tempDir.path(), storage);
+		target.appendMessage({ role: "user", content: "target", timestamp: Date.now() });
+		await target.ensureOnDisk();
+		try {
+			expect(await session.switchSession(target.getSessionFile()!, { onCwdChange: async () => false })).toBe(false);
+			expect(session.sessionFile).toBe(sourceFile);
+			expect(mode.vibeModeEnabled).toBe(false);
+			expect(session.sessionManager.buildSessionContext().mode).toBe("none");
+			expect(session.getActiveToolNames()).toEqual([]);
+		} finally {
+			await target.close();
+		}
+	});
+
+	it("completes a switch whose default Vibe activation fails with ordinary tools and a warning", async () => {
+		session.settings.set("vibe.defaultOnStartup", true);
+		await mode.init({ suppressWelcomeIntro: true });
+		await mode.handleVibeModeCommand();
+		await session.sessionManager.ensureOnDisk();
+		const target = SessionManager.create(tempDir.path(), tempDir.path(), storage);
+		target.appendMessage({ role: "user", content: "target", timestamp: Date.now() });
+		await target.ensureOnDisk();
+		const notices: string[] = [];
+		const unsubscribe = session.subscribe(event => {
+			if (event.type === "notice" && event.level === "error") notices.push(event.message);
+		});
+		const warning = vi.spyOn(mode, "showWarning");
+		failVibePrompt = true;
+		try {
+			expect(await session.switchSession(target.getSessionFile()!)).toBe(true);
+			expect(session.sessionFile).toBe(target.getSessionFile());
+			expect(mode.vibeModeEnabled).toBe(false);
+			expect(session.getAllToolNames().toSorted()).toEqual(["read", "todo"]);
+			expect(session.getActiveToolNames()).toEqual([]);
+			expect(vibeModeEntryCount(session.sessionManager)).toBe(0);
+			// The default's own failure is caught by the default policy; the
+			// session-mode error notice stays reserved for reconcile failures.
+			expect(notices).toEqual([]);
+			expect(warning).toHaveBeenCalledWith(
+				expect.stringMatching(
+					/^Vibe startup default failed: .*Vibe prompt refresh failed.*; continuing in normal mode\.$/,
+				),
+			);
+			failVibePrompt = false;
+			await mode.handleVibeModeCommand();
+			expect(mode.vibeModeEnabled).toBe(true);
+		} finally {
+			unsubscribe();
+			await target.close();
+		}
+	});
+
+	it("completes a new session and reports a failed Vibe default without leaving hybrid tools", async () => {
+		session.settings.set("vibe.defaultOnStartup", true);
+		await mode.init({ suppressWelcomeIntro: true });
+		await mode.handleVibeModeCommand();
+		const sourceId = session.sessionId;
+		const notices: string[] = [];
+		const unsubscribe = session.subscribe(event => {
+			if (event.type === "notice" && event.level === "error") notices.push(event.message);
+		});
+		const warning = vi.spyOn(mode, "showWarning");
+		failVibePrompt = true;
+		try {
+			expect(await session.newSession()).toBe(true);
+			expect(session.sessionId).not.toBe(sourceId);
+			expect(mode.vibeModeEnabled).toBe(false);
+			expect(session.getAllToolNames().toSorted()).toEqual(["read", "todo"]);
+			expect(session.getActiveToolNames()).toEqual([]);
+			expect(vibeModeEntryCount(session.sessionManager)).toBe(0);
+			expect(notices).toEqual([]);
+			expect(warning).toHaveBeenCalledWith(
+				expect.stringMatching(
+					/^Vibe startup default failed: .*Vibe prompt refresh failed.*; continuing in normal mode\.$/,
+				),
+			);
+			failVibePrompt = false;
+			await mode.handleVibeModeCommand();
+			expect(mode.vibeModeEnabled).toBe(true);
+		} finally {
+			unsubscribe();
+		}
+	});
+
+	it("continues cold start as an ordinary session when the Vibe default fails to activate", async () => {
+		session.settings.set("vibe.defaultOnStartup", true);
+		await session.setActiveToolsByName(["read"]);
+		const toolsBefore = session.getEnabledToolNames();
+		const warning = vi.spyOn(mode, "showWarning");
+		failVibePrompt = true;
+
+		await expect(mode.init({ suppressWelcomeIntro: true })).resolves.toBeUndefined();
+
+		expect(mode.vibeModeEnabled).toBe(false);
+		expect(session.getVibeModeState()).toBeUndefined();
+		expect(session.getEnabledToolNames()).toEqual(toolsBefore);
+		expect(session.getAllToolNames().toSorted()).toEqual(["read", "todo"]);
+		expect(vibeModeEntryCount(session.sessionManager)).toBe(0);
+		expect(warning).toHaveBeenCalledWith(
+			expect.stringMatching(
+				/^Vibe startup default failed: .*Vibe prompt refresh failed.*; continuing in normal mode\.$/,
+			),
+		);
+
+		// The session stays usable: an explicit /vibe still enters normally.
+		failVibePrompt = false;
+		await mode.handleVibeModeCommand();
+		expect(mode.vibeModeEnabled).toBe(true);
+	});
+
+	// Synthetic seam: production appendModeChange never throws (a storage failure
+	// is latched and the entry stays in memory; see the ENOSPC test below). The
+	// throw stands in for any exception after the Vibe tools are live, which is
+	// what the default's own rollback must undo.
+	it("rolls back a Vibe default hit by a late exception after its tools were activated", async () => {
+		session.settings.set("vibe.defaultOnStartup", true);
+		await session.setActiveToolsByName(["read"]);
+		const toolsBefore = session.getEnabledToolNames().toSorted();
+		const appendModeChange = session.sessionManager.appendModeChange.bind(session.sessionManager);
+		vi.spyOn(session.sessionManager, "appendModeChange").mockImplementation((mode, data) => {
+			if (mode === "vibe") throw new Error("late exception");
+			return appendModeChange(mode, data);
+		});
+		const warning = vi.spyOn(mode, "showWarning");
+
+		await expect(mode.init({ suppressWelcomeIntro: true })).resolves.toBeUndefined();
+
+		expect(warning).toHaveBeenCalledWith(
+			expect.stringMatching(/^Vibe startup default failed: .*late exception.*; continuing in normal mode\.$/),
+		);
+		// The warning is only true once the late failure has been rolled back.
+		expect(mode.vibeModeEnabled).toBe(false);
+		expect(session.getVibeModeState()).toBeUndefined();
+		expect(session.getEnabledToolNames().toSorted()).toEqual(toolsBefore);
+		expect(session.getAllToolNames().toSorted()).toEqual(["read", "todo"]);
+		expect(vibeModeEntryCount(session.sessionManager)).toBe(0);
+	});
+
+	it("names the state left behind when a Vibe default's late exception cannot be rolled back", async () => {
+		session.settings.set("vibe.defaultOnStartup", true);
+		await session.setActiveToolsByName(["read"]);
+		const toolsBefore = session.getEnabledToolNames().toSorted();
+		const appendModeChange = session.sessionManager.appendModeChange.bind(session.sessionManager);
+		vi.spyOn(session.sessionManager, "appendModeChange").mockImplementation((mode, data) => {
+			if (mode === "vibe") throw new Error("late exception");
+			return appendModeChange(mode, data);
+		});
+		const deactivate = vi.spyOn(session, "deactivateVibeTools").mockRejectedValue(new Error("tool restore failed"));
+		const warning = vi.spyOn(mode, "showWarning");
+
+		await expect(mode.init({ suppressWelcomeIntro: true })).resolves.toBeUndefined();
+
+		expect(mode.vibeModeEnabled).toBe(true);
+		expect(warning).not.toHaveBeenCalledWith(expect.stringContaining("continuing in normal mode"));
+		expect(warning).toHaveBeenCalledWith(
+			expect.stringMatching(
+				/^Vibe startup default failed: .*late exception.*; rollback failed, Vibe mode is still active/,
+			),
+		);
+
+		// The named state is actionable: an explicit /vibe exit restores the toolset.
+		deactivate.mockRestore();
+		await mode.handleVibeModeCommand();
+		expect(mode.vibeModeEnabled).toBe(false);
+		expect(session.getEnabledToolNames().toSorted()).toEqual(toolsBefore);
+	});
+
+	it("keeps the Vibe default active when persisting its mode change hits a full disk", async () => {
+		session.settings.set("vibe.defaultOnStartup", true);
+		session.sessionManager.appendMessage({ role: "user", content: "prior work", timestamp: Date.now() });
+		session.sessionManager.appendModeChange("none");
+		await session.sessionManager.ensureOnDisk();
+		const warning = vi.spyOn(mode, "showWarning");
+		// The disk is full exactly while the real append persists the Vibe entry.
+		const appendModeChange = session.sessionManager.appendModeChange.bind(session.sessionManager);
+		vi.spyOn(session.sessionManager, "appendModeChange").mockImplementation((mode, data) => {
+			storage.failSyncWrites = mode === "vibe";
+			try {
+				return appendModeChange(mode, data);
+			} finally {
+				storage.failSyncWrites = false;
+			}
+		});
+
+		await expect(mode.init({ suppressWelcomeIntro: true })).resolves.toBeUndefined();
+
+		// The real disk failure hit the Vibe mode_change write itself...
+		expect(storage.failedSyncWrites.some(line => /"type":"mode_change".*"mode":"vibe"/.test(line))).toBe(true);
+		// ...and is not an activation failure: the entry stays in memory for the
+		// next rewrite, so Vibe is on and no rollback or warning happens.
+		expect(mode.vibeModeEnabled).toBe(true);
+		expect(vibeModeEntryCount(session.sessionManager)).toBe(1);
+		expect(warning).not.toHaveBeenCalledWith(expect.stringContaining("Vibe startup default failed"));
+		expect(warning).toHaveBeenCalledWith(
+			expect.stringContaining("Session persistence failed: no space left on device"),
+		);
+
+		// Once space returns, the next entry rewrites the journal, Vibe entry included.
+		session.sessionManager.appendMessage({ role: "user", content: "after recovery", timestamp: Date.now() });
+		expect(await Bun.file(session.sessionFile!).text()).toMatch(/"type":"mode_change".*"mode":"vibe"/);
+	});
+
+	it("keeps the plan startup default out after a failed Vibe default promised normal mode", async () => {
+		session.settings.set("vibe.defaultOnStartup", true);
+		session.settings.set("plan.defaultOnStartup", true);
+		const warning = vi.spyOn(mode, "showWarning");
+		failVibePrompt = true;
+
+		await mode.init({ suppressWelcomeIntro: true });
+
+		expect(warning).toHaveBeenCalledWith(
+			expect.stringMatching(/^Vibe startup default failed: .*; continuing in normal mode\.$/),
+		);
+		expect(mode.vibeModeEnabled).toBe(false);
+		expect(mode.planModeEnabled).toBe(false);
+		expect(mode.planModePaused).toBe(false);
+	});
+
+	/**
+	 * Drives the Vibe startup default through /new into its own second cleanup
+	 * and holds it there. Activation installs the Vibe tools and then fails, and
+	 * #enterVibeMode's own cleanup fails too, so the default's rollback is what
+	 * restores the tools — after the entry promise is gone and Vibe is still off.
+	 */
+	async function holdDefaultInSecondCleanup(): Promise<HeldDefaultRollback> {
+		session.settings.set("vibe.defaultOnStartup", true);
+		const realActivate = session.activateVibeTools.bind(session);
+		const activate = vi.spyOn(session, "activateVibeTools").mockImplementation(async names => {
+			await realActivate(names);
+			throw new Error("late activation failure");
+		});
+		const deactivate = session.deactivateVibeTools.bind(session);
+		const secondCleanup = Promise.withResolvers<void>();
+		const release = Promise.withResolvers<void>();
+		let cleanups = 0;
+		vi.spyOn(session, "deactivateVibeTools").mockImplementation(async tools => {
+			cleanups++;
+			if (cleanups === 1) throw new Error("first cleanup failed");
+			secondCleanup.resolve();
+			await release.promise;
+			await deactivate(tools);
+		});
+		const first = session.newSession();
+		await secondCleanup.promise;
+		expect(mode.vibeModeEnabled).toBe(false);
+		expect(session.getAllToolNames()).toContain("vibe_spawn");
+		return { first, release: release.resolve, activate };
+	}
+
+	it("holds session transitions through the Vibe default's own rollback", async () => {
+		await mode.init({ suppressWelcomeIntro: true });
+		const sourceId = session.sessionId;
+		const { first, release } = await holdDefaultInSecondCleanup();
+
+		const newSession = vi.spyOn(session, "newSession").mockResolvedValue(false);
+		const warning = vi.spyOn(mode, "showWarning");
+		await mode.handleClearCommand();
+		expect(warning).toHaveBeenCalledWith("Exit vibe mode first.");
+		expect(newSession).not.toHaveBeenCalled();
+
+		release();
+		expect(await first).toBe(true);
+		expect(session.sessionId).not.toBe(sourceId);
+		expect(mode.vibeModeEnabled).toBe(false);
+		expect(session.getAllToolNames().toSorted()).toEqual(["read", "todo"]);
+		expect(warning).toHaveBeenCalledWith(
+			expect.stringMatching(/^Vibe startup default failed: .*; continuing in normal mode\.$/),
+		);
+	});
+
+	it("restores a /vibe draft rejected during the default's activation, then accepts the retry", async () => {
+		await mode.init({ suppressWelcomeIntro: true });
+		session.settings.set("vibe.defaultOnStartup", true);
+		const activationStarted = Promise.withResolvers<void>();
+		const finishActivation = Promise.withResolvers<void>();
+		const activate = vi.spyOn(session, "activateVibeTools").mockImplementationOnce(async () => {
+			activationStarted.resolve();
+			await finishActivation.promise;
+			throw new Error("default activation failed");
+		});
+		const first = session.newSession();
+		await activationStarted.promise;
+		expect(mode.vibeModeEnabled).toBe(false);
+
+		// The submitted draft, as the editor holds it when the command dispatches.
+		const images: ImageContent[] = [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }];
+		const imageLinks = ["file:///shot.png"];
+		const commandText = "/vibe [Image #1, 10x10] fix this";
+		mode.editor.setText(commandText);
+		mode.editor.pendingImages = images;
+		mode.editor.pendingImageLinks = imageLinks;
+		const showError = vi.spyOn(mode, "showError");
+
+		expect(await executeBuiltinSlashCommand(commandText, { ctx: mode, input: { images, imageLinks } })).toBe(true);
+
+		expect(showError).toHaveBeenCalledWith(
+			"Vibe startup default is still being applied; retry /vibe when it finishes.",
+		);
+		expect(mode.editor.getText()).toBe(commandText);
+		expect(mode.editor.pendingImages).toEqual(images);
+		expect(mode.editor.pendingImageLinks).toEqual(imageLinks);
+		expect(activate).toHaveBeenCalledTimes(1);
+
+		// The default settles (here: fails and continues in normal mode); the
+		// resubmitted command then enters Vibe and delivers prompt and images.
+		finishActivation.resolve();
+		expect(await first).toBe(true);
+		expect(mode.vibeModeEnabled).toBe(false);
+		const waiter = mode.getUserInput();
+		expect(await executeBuiltinSlashCommand(commandText, { ctx: mode, input: { images, imageLinks } })).toBe(true);
+
+		expect(mode.vibeModeEnabled).toBe(true);
+		expect(activate).toHaveBeenCalledTimes(2);
+		const input = await waiter;
+		expect(input.text).toBe("[Image #1, 10x10] fix this");
+		expect(input.images).toEqual(images);
+		expect(input.imageLinks).toEqual(imageLinks);
+	});
+
+	it("rejects an explicit /vibe while the Vibe default is still rolling back", async () => {
+		await mode.init({ suppressWelcomeIntro: true });
+		const { first, release, activate } = await holdDefaultInSecondCleanup();
+
+		const vibe = mode.handleVibeModeCommand("wait for vibe").then(
+			() => undefined,
+			(error: unknown) => error,
+		);
+		for (let index = 0; index < 5; index++) await Promise.resolve();
+		// No second entry may snapshot the unsettled toolset.
+		expect(activate).toHaveBeenCalledTimes(1);
+
+		release();
+		expect(await first).toBe(true);
+		const error = await vibe;
+		expect(error).toBeInstanceOf(Error);
+		expect(String(error)).toContain("Vibe startup default is still being applied");
+		expect(mode.vibeModeEnabled).toBe(false);
+		expect(session.getAllToolNames().toSorted()).toEqual(["read", "todo"]);
+	});
+
+	it.each(["before", "after"] as const)(
+		"disables a reset loop whose iteration meets the Vibe default's rollback %s its condition",
+		async phase => {
+			await mode.init({ suppressWelcomeIntro: true });
+			settings.set("loop.mode", "reset");
+			const condition = Promise.withResolvers<LoopConditionVerdict>();
+			if (phase === "after") {
+				vi.spyOn(loopCondition, "evaluateLoopCondition").mockImplementation(async () => await condition.promise);
+				mode.loopCondition = { command: "sleep 30", until: false };
+			}
+			const clear = vi.spyOn(mode, "handleClearCommand");
+			const showStatus = vi.spyOn(mode, "showStatus");
+			const resolved: SubmittedUserInput[] = [];
+			const arm = () => {
+				mode.loopModeEnabled = true;
+				mode.loopPrompt = "reset me";
+				const pending = mode.getUserInput();
+				void pending.then(input => resolved.push(input));
+			};
+			let held: HeldDefaultRollback | undefined;
+			try {
+				if (phase === "before") {
+					held = await holdDefaultInSecondCleanup();
+					arm();
+					await Bun.sleep(900);
+				} else {
+					// The iteration passes the pre-condition guard with no Vibe
+					// transition in flight, then the condition resolves mid-rollback.
+					arm();
+					await Bun.sleep(900);
+					held = await holdDefaultInSecondCleanup();
+					condition.resolve({ kind: "continue" });
+					for (let index = 0; index < 5; index++) await Promise.resolve();
+				}
+
+				expect(clear).not.toHaveBeenCalled();
+				expect(resolved).toHaveLength(0);
+				expect(mode.loopModeEnabled).toBe(false);
+				expect(showStatus).toHaveBeenCalledWith("Exit vibe mode before using reset loops. Loop mode disabled.");
+			} finally {
+				mode.disableLoopMode("Loop mode disabled.");
+				mode.cancelPendingSubmission();
+				mode.onInputCallback?.({ text: "", cancelled: true, started: false });
+				condition.resolve({ kind: "continue" });
+				held?.release();
+				await held?.first;
+			}
+		},
+	);
+
+	it("keeps an explicit /vibe activation failure rejecting instead of downgrading it to a warning", async () => {
+		await mode.init({ suppressWelcomeIntro: true });
+		const warning = vi.spyOn(mode, "showWarning");
+		failVibePrompt = true;
+
+		await expect(mode.handleVibeModeCommand("dropped prompt")).rejects.toThrow("Vibe prompt refresh failed");
+
+		expect(mode.vibeModeEnabled).toBe(false);
+		expect(session.getActiveToolNames()).toEqual([]);
+		expect(warning).not.toHaveBeenCalledWith(expect.stringContaining("Vibe startup default failed"));
+	});
+
+	it.each(["activation", "rollback"] as const)(
+		"refuses session transitions while Vibe %s is in flight",
+		async phase => {
+			await mode.init({ suppressWelcomeIntro: true });
+			const gate = Promise.withResolvers<void>();
+			if (phase === "activation") {
+				vi.spyOn(session, "activateVibeTools").mockImplementation(() => gate.promise);
+			} else {
+				vi.spyOn(session, "activateVibeTools").mockRejectedValue(new Error("activation failed"));
+				const deactivate = session.deactivateVibeTools.bind(session);
+				vi.spyOn(session, "deactivateVibeTools").mockImplementation(async tools => {
+					await gate.promise;
+					await deactivate(tools);
+				});
+			}
+			const newSession = vi.spyOn(session, "newSession");
+			const warning = vi.spyOn(mode, "showWarning");
+			const sourceId = session.sessionId;
+
+			const entering = mode.handleVibeModeCommand().catch(error => error);
+			for (let index = 0; index < 5; index++) await Promise.resolve();
+			expect(mode.vibeModeEnabled).toBe(false);
+
+			await mode.handleClearCommand();
+			expect(warning).toHaveBeenCalledWith("Exit vibe mode first.");
+			expect(newSession).not.toHaveBeenCalled();
+			expect(session.sessionId).toBe(sourceId);
+
+			gate.resolve();
+			await entering;
+			expect(session.sessionId).toBe(sourceId);
+		},
+	);
+
+	it.each(["plan", "plan_paused"] as const)(
+		"preserves a restored %s instead of imposing the Vibe default",
+		async restoredMode => {
+			session.settings.set("vibe.defaultOnStartup", true);
+			session.sessionManager.appendModeChange(restoredMode, { planFilePath: "local://PLAN.md" });
+			await mode.init({ suppressWelcomeIntro: true });
+			expect(mode.vibeModeEnabled).toBe(false);
+			expect(mode.planModeEnabled).toBe(restoredMode === "plan");
+			expect(mode.planModePaused).toBe(restoredMode === "plan_paused");
+			expect(session.getAllToolNames()).not.toContain("vibe_spawn");
+		},
+	);
+
+	it.each(["goal", "goal_paused"] as const)(
+		"preserves work from a restored %s with the Vibe default enabled",
+		async restoredMode => {
+			session.settings.set("vibe.defaultOnStartup", true);
+			session.sessionManager.appendModeChange(restoredMode, {
+				goal: {
+					id: "retained-goal",
+					objective: "Keep the existing work",
+					status: restoredMode === "goal" ? "active" : "paused",
+					tokensUsed: 123,
+					timeUsedSeconds: 12,
+					createdAt: 1,
+					updatedAt: 1,
+				},
+			});
+			await mode.init({ suppressWelcomeIntro: true });
+			expect(mode.vibeModeEnabled).toBe(false);
+			expect(mode.goalModePaused).toBe(true);
+			expect(session.getGoalModeState()?.goal).toMatchObject({
+				id: "retained-goal",
+				tokensUsed: 123,
+				status: "paused",
+			});
+		},
+	);
+
+	it("does not turn a worker into a director when it inherits the startup setting", async () => {
+		await session.dispose();
+		session = new AgentSession({
+			agent: new Agent({ initialState: { model: modelRegistry.find("anthropic", "claude-sonnet-4-5") } }),
+			agentKind: "sub",
+			sessionManager: SessionManager.create(tempDir.path(), tempDir.path(), storage),
+			settings: Settings.isolated({ "vibe.defaultOnStartup": true }),
+			modelRegistry,
+			toolRegistry: new Map([["read", stubTool("read")]]),
+			createVibeTools: () => VIBE_TOOL_NAMES.map(stubTool),
+		});
+		mode.stop();
+		mode = new InteractiveMode(session, "test");
+		await mode.init({ suppressWelcomeIntro: true });
+		expect(mode.vibeModeEnabled).toBe(false);
+		expect(session.getAllToolNames()).toEqual(["read"]);
 	});
 
 	it("preserves the parent Todo tool and restores the exact pre-vibe toolset on exit", async () => {

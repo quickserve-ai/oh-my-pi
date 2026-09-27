@@ -21,6 +21,25 @@ Toggle it with the `/vibe` slash command:
 
 `/vibe` is an interactive-TUI command. The mode and worker lifecycle events are persisted with the parent session. Resuming a session whose current mode is `vibe` rehydrates completed workers as idle/parked sessions with their child transcripts; a turn interrupted by process restart is not resumed automatically. Explicitly killed or mode-exit workers stay terminal.
 
+### Starting in Vibe by default
+
+Set `vibe.defaultOnStartup` in your global or project `config.yml`, or in an overlay passed with `--config`:
+
+```yaml
+vibe:
+  defaultOnStartup: true
+```
+
+Use `--vibe` or `--no-vibe` for a runtime-only override. CLI flags take precedence over global settings, project settings, and `--config` overlays; if both flags appear, the last one wins. `--no-vibe` disables the startup default even when configuration enables it, but does not erase an already-persisted Vibe, plan, or goal mode.
+
+The setting is opt-in. It enters Vibe before the first task turn of a top-level interactive session, including ordinary resumed sessions, session switches, and new sessions. It takes precedence over `plan.defaultOnStartup` on a fresh launch, even when its activation fails (the session then starts in normal mode, not Plan), but never replaces an active or paused plan or goal. Persisted Vibe sessions keep the normal restoration and worker-rehydration behavior.
+
+Workers, headless print/RPC/SDK sessions, and `omp render` transcript replays do not inherit director mode from this setting. `omp render` also replays a session persisted in Vibe without entering Vibe. Tool-approval settings and provider safety checks are independent and unchanged.
+
+`/vibe` can still exit for the current session. The default applies again on the next launch or session transition, even if the resumed session last recorded an explicit Vibe exit. Exit Vibe before `/new`, fork, move, or handoff; the setting does not bypass worker cleanup or those transition guards.
+
+If default activation fails at launch, or after `/new` or a successful session switch has committed its transcript, the session continues in normal mode with its previous toolset and a warning reports the failure; the completed transition remains valid and the `/new` lifecycle hook still runs. Failed activation removes the transient Vibe tools; retry `/vibe` after resolving the error. An explicit `/vibe` whose activation fails still fails and drops its prompt. A switch rejected or rolled back for another reason does not reapply the startup default to the original session.
+
 ## The two worker tiers
 
 Every worker is a real, keep-alive task-executor subagent with the normal coding tool surface and its own persisted child transcript. Choose a tier when spawning:

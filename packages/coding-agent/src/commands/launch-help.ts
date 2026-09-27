@@ -20,6 +20,10 @@ export const launchHelp = {
 		smol: Flags.string({ description: "Smol/fast model for lightweight tasks (or PI_SMOL_MODEL env)" }),
 		slow: Flags.string({ description: "Slow/reasoning model for thorough analysis (or PI_SLOW_MODEL env)" }),
 		plan: Flags.string({ description: "Plan model for architectural planning (or PI_PLAN_MODEL env)" }),
+		vibe: Flags.boolean({ description: "Default top-level interactive sessions to Vibe for this run" }),
+		"no-vibe": Flags.boolean({
+			description: "Disable the Vibe startup default for this run; preserve persisted modes",
+		}),
 		prewalk: Flags.boolean({
 			description:
 				"Switch from the active model to a fast/cheap model at the first edit/write after the plan's todo list exists (default off; see prewalk.enabled)",

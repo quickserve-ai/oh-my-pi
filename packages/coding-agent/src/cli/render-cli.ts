@@ -162,6 +162,9 @@ function formatMs(ms: number): string {
 export async function runRenderCommand(args: RenderCommandArgs): Promise<number> {
 	const cwd = getProjectDir();
 	const settings = await Settings.init({ cwd });
+	// Rendering replays a transcript; it is not a top-level interactive session,
+	// so the Vibe startup default (config or --vibe) must never activate here.
+	settings.override("vibe.defaultOnStartup", false);
 	await initTheme();
 
 	const sourcePath = await resolveTargetSession(args.session, cwd);
@@ -185,6 +188,10 @@ export async function runRenderCommand(args: RenderCommandArgs): Promise<number>
 			suppressBreadcrumb: true,
 		});
 		const openMs = performance.now() - openStart;
+		// A persisted Vibe mode must not be restored either: render has no Vibe tool
+		// factory, and replay must never enter director mode. The entry lands in
+		// the temporary working copy only; the source session is never touched.
+		if (sessionManager.buildSessionContext().mode === "vibe") sessionManager.appendModeChange("none");
 
 		const authStorage = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
 		const modelRegistry = new ModelRegistry(authStorage);

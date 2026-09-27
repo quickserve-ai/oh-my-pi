@@ -1049,6 +1049,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	// Loop reset guards treat a pending entry as active, and a concurrent /vibe
 	// command awaits it instead of dispatching its prompt on the stale toolset.
 	#vibeModeEntry: Promise<void> | undefined;
+	/** The Vibe startup default's whole attempt, including its own rollback. */
+	#vibeDefaultTransition: Promise<void> | undefined;
 	// FIFO tail + live count for concurrent /vibe skill dispatches. A skill
 	// prompt yields on its file read before the turn reserves, so each skill
 	// links behind its predecessor (arrival order) while the count — visible
@@ -1824,8 +1826,15 @@ export class InteractiveMode implements InteractiveModeContext {
 			await this.#liveCommandController.stop();
 			await this.#quiesceVibeForSessionSwitch();
 		});
-		this.session.setSessionSwitchReconciler?.(() => this.#reconcileModeFromSession({ preserveActiveGoal: true }));
-		await logger.time("InteractiveMode.init:reconcileMode", () => this.#reconcileModeFromSession());
+		this.session.setSessionSwitchReconciler?.(async ({ applyStartupDefault }) => {
+			await this.#reconcileModeFromSession({ preserveActiveGoal: true });
+			if (applyStartupDefault) await this.#applyVibeStartupDefault();
+		});
+		let vibeDefaultAttempted = false;
+		await logger.time("InteractiveMode.init:reconcileMode", async () => {
+			await this.#reconcileModeFromSession();
+			vibeDefaultAttempted = await this.#applyVibeStartupDefault();
+		});
 
 		// Brand-new sessions optionally start in plan mode when the user has made it
 		// the startup default. "Brand-new" means the resolved branch carries no
@@ -1839,8 +1848,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		// to launch (not the switch reconciler above) so /new and the plan-approval →
 		// execution handoff clear never get dragged back into plan mode. #enterPlanMode
 		// is idempotent and self-guards against an already-active plan/goal mode; it
-		// does not check plan.enabled itself.
-		if (shouldEnterPlanModeOnStartup(this.sessionManager, this.session.settings)) {
+		// does not check plan.enabled itself. A Vibe startup default takes precedence
+		// even when it fails: its warning promised normal mode, so Plan must not
+		// follow it.
+		if (!vibeDefaultAttempted && shouldEnterPlanModeOnStartup(this.sessionManager, this.session.settings)) {
 			await this.#enterPlanMode();
 		}
 
@@ -2321,7 +2332,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 
-		if (action === "reset" && (this.vibeModeEnabled || this.#vibeModeEntry !== undefined)) {
+		if (
+			action === "reset" &&
+			(this.vibeModeEnabled || this.#vibeModeEntry !== undefined || this.#vibeDefaultTransition !== undefined)
+		) {
 			this.disableLoopMode("Exit vibe mode before using reset loops. Loop mode disabled.");
 			return;
 		}
@@ -2351,9 +2365,13 @@ export class InteractiveMode implements InteractiveModeContext {
 		// /vibe can be enabled while the gate was awaiting: the pre-gate guard
 		// above is stale, and handleClearCommand would only warn and then let
 		// the iteration submit without resetting. Check the entering transition
-		// too: vibeModeEnabled is still false while activateVibeTools is in
-		// flight, but the reset must not run concurrently with the toolset switch.
-		if (action === "reset" && (this.vibeModeEnabled || this.#vibeModeEntry !== undefined)) {
+		// too: vibeModeEnabled is still false while activateVibeTools (or the
+		// startup default's rollback) is in flight, but the reset must not run
+		// concurrently with the toolset switch.
+		if (
+			action === "reset" &&
+			(this.vibeModeEnabled || this.#vibeModeEntry !== undefined || this.#vibeDefaultTransition !== undefined)
+		) {
 			this.disableLoopMode("Exit vibe mode before using reset loops. Loop mode disabled.");
 			return;
 		}
@@ -4873,6 +4891,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		initialPrompt?: string,
 		input?: Pick<SubmittedUserInput, "images" | "imageLinks">,
 	): Promise<boolean> {
+		// The startup default's attempt (including its own rollback) owns the
+		// toolset until it settles; a /vibe now would snapshot unsettled tools.
+		// Reject rather than wait: the caller keeps the command draft.
+		if (this.#vibeDefaultTransition !== undefined) {
+			throw new Error("Vibe startup default is still being applied; retry /vibe when it finishes.");
+		}
 		if (this.vibeModeEnabled) {
 			await this.#exitVibeMode();
 			return false;
@@ -4986,6 +5010,73 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
+	/** Launch/switch policy only: explicit mode exit stays usable within a session. */
+	/** Returns true when the default tried to enter Vibe, whether or not it succeeded. */
+	async #applyVibeStartupDefault(): Promise<boolean> {
+		if (
+			!this.session.settings.get("vibe.defaultOnStartup") ||
+			this.session.getAgentKind() !== "main" ||
+			this.vibeModeEnabled ||
+			this.planModeEnabled ||
+			this.planModePaused ||
+			this.goalModeEnabled ||
+			this.goalModePaused
+		) {
+			return false;
+		}
+		// Only the default is best-effort: the session continues as an ordinary
+		// one. An explicit /vibe keeps rejecting (and dropping its prompt) on the
+		// same failure. The transition guard stays held until the rollback below
+		// is done, not just while #enterVibeMode's own entry is in flight.
+		const previousTools = this.session.getEnabledToolNames();
+		const attempt = (async () => {
+			try {
+				await this.#enterVibeMode();
+			} catch (error) {
+				logger.warn("Vibe startup default failed", { error: String(error) });
+				const leftBehind = await this.#rollBackFailedVibeDefault(previousTools);
+				this.showWarning(
+					leftBehind
+						? `Vibe startup default failed: ${String(error)}; rollback failed, ${leftBehind}.`
+						: `Vibe startup default failed: ${String(error)}; continuing in normal mode.`,
+				);
+			}
+		})();
+		this.#vibeDefaultTransition = attempt;
+		try {
+			await attempt;
+		} finally {
+			if (this.#vibeDefaultTransition === attempt) this.#vibeDefaultTransition = undefined;
+		}
+		return true;
+	}
+
+	/**
+	 * #enterVibeMode only rolls back a failed tool activation; a later failure
+	 * (e.g. persisting the mode change) leaves Vibe active. Undo that through the
+	 * exit path. Returns the state left behind when ordinary tools are not back.
+	 */
+	async #rollBackFailedVibeDefault(previousTools: string[]): Promise<string | undefined> {
+		const toolsRestored = () => {
+			const current = new Set(this.session.getEnabledToolNames());
+			return current.size === previousTools.length && previousTools.every(name => current.has(name));
+		};
+		try {
+			if (this.vibeModeEnabled) {
+				await this.#exitVibeMode();
+			} else if (!toolsRestored()) {
+				await this.session.deactivateVibeTools(previousTools);
+			}
+		} catch (error) {
+			logger.warn("Vibe startup default rollback failed", { error: String(error) });
+		}
+		if (this.vibeModeEnabled) return "Vibe mode is still active (run /vibe to exit it)";
+		if (!toolsRestored()) {
+			return `Vibe mode is off but the toolset was not restored (enabled: ${this.session.getEnabledToolNames().join(", ") || "none"})`;
+		}
+		return undefined;
+	}
+
 	async #enterVibeMode(options?: { persistModeChange?: boolean; previousTools?: string[] }): Promise<void> {
 		if (this.vibeModeEnabled) {
 			return;
@@ -5025,7 +5116,16 @@ export class InteractiveMode implements InteractiveModeContext {
 		// awaits it below, so a failure is always observed (no unhandled
 		// rejection) and propagates to every joiner, dropping their prompts.
 		const entry = (async () => {
-			await this.session.activateVibeTools(vibeBaseTools);
+			try {
+				await this.session.activateVibeTools(vibeBaseTools);
+			} catch (error) {
+				try {
+					await this.session.deactivateVibeTools(previousTools);
+				} finally {
+					await vibeRegistry.suspendScope(ownerScope, this.session.asyncJobManager);
+				}
+				throw error;
+			}
 			this.#vibeModePreviousTools = previousTools;
 			this.#vibeModeOwnerScope = ownerScope;
 			this.vibeModeEnabled = true;
@@ -6543,7 +6643,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	#vibeSessionTransitionBlocked(): boolean {
-		if (!this.vibeModeEnabled) return false;
+		// vibeModeEnabled is still false while activation (or its rollback) is
+		// in flight; a transition must not run concurrently with that switch.
+		if (!this.vibeModeEnabled && this.#vibeModeEntry === undefined && this.#vibeDefaultTransition === undefined) {
+			return false;
+		}
 		this.showWarning("Exit vibe mode first.");
 		return true;
 	}
