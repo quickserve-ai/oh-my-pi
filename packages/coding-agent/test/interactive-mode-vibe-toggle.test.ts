@@ -7,10 +7,11 @@
  * 3. Exiting unregisters the vibe tools and restores the pre-vibe active toolset
  *    exactly, including the legitimate empty set.
  */
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentTool, type StreamFn } from "@oh-my-pi/pi-agent-core";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -25,6 +26,7 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm, VIBE_MODE_CONTEXT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import {
 	FileSessionStorage,
 	type SessionStorageWriter,
@@ -106,6 +108,13 @@ function armOrderLoop(
 		}
 	})();
 	return { done, order };
+}
+
+/** The Vibe startup default held inside its own second cleanup (see holdDefaultInSecondCleanup). */
+interface HeldDefaultRollback {
+	first: Promise<boolean>;
+	release: () => void;
+	activate: Mock<AgentSession["activateVibeTools"]>;
 }
 
 class ExitFaultStorage extends FileSessionStorage {
@@ -501,11 +510,7 @@ describe("InteractiveMode vibe mode toggle", () => {
 	 * #enterVibeMode's own cleanup fails too, so the default's rollback is what
 	 * restores the tools — after the entry promise is gone and Vibe is still off.
 	 */
-	async function holdDefaultInSecondCleanup(): Promise<{
-		first: Promise<boolean>;
-		release: () => void;
-		activate: ReturnType<typeof vi.spyOn>;
-	}> {
+	async function holdDefaultInSecondCleanup(): Promise<HeldDefaultRollback> {
 		session.settings.set("vibe.defaultOnStartup", true);
 		const realActivate = session.activateVibeTools.bind(session);
 		const activate = vi.spyOn(session, "activateVibeTools").mockImplementation(async names => {
@@ -551,6 +556,55 @@ describe("InteractiveMode vibe mode toggle", () => {
 		);
 	});
 
+	it("restores a /vibe draft rejected during the default's activation, then accepts the retry", async () => {
+		await mode.init({ suppressWelcomeIntro: true });
+		session.settings.set("vibe.defaultOnStartup", true);
+		const activationStarted = Promise.withResolvers<void>();
+		const finishActivation = Promise.withResolvers<void>();
+		const activate = vi.spyOn(session, "activateVibeTools").mockImplementationOnce(async () => {
+			activationStarted.resolve();
+			await finishActivation.promise;
+			throw new Error("default activation failed");
+		});
+		const first = session.newSession();
+		await activationStarted.promise;
+		expect(mode.vibeModeEnabled).toBe(false);
+
+		// The submitted draft, as the editor holds it when the command dispatches.
+		const images: ImageContent[] = [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }];
+		const imageLinks = ["file:///shot.png"];
+		const commandText = "/vibe [Image #1, 10x10] fix this";
+		mode.editor.setText(commandText);
+		mode.editor.pendingImages = images;
+		mode.editor.pendingImageLinks = imageLinks;
+		const showError = vi.spyOn(mode, "showError");
+
+		expect(await executeBuiltinSlashCommand(commandText, { ctx: mode, input: { images, imageLinks } })).toBe(true);
+
+		expect(showError).toHaveBeenCalledWith(
+			"Vibe startup default is still being applied; retry /vibe when it finishes.",
+		);
+		expect(mode.editor.getText()).toBe(commandText);
+		expect(mode.editor.pendingImages).toEqual(images);
+		expect(mode.editor.pendingImageLinks).toEqual(imageLinks);
+		expect(activate).toHaveBeenCalledTimes(1);
+
+		// The default settles (here: fails and continues in normal mode); the
+		// resubmitted command then enters Vibe and delivers prompt and images.
+		finishActivation.resolve();
+		expect(await first).toBe(true);
+		expect(mode.vibeModeEnabled).toBe(false);
+		const waiter = mode.getUserInput();
+		expect(await executeBuiltinSlashCommand(commandText, { ctx: mode, input: { images, imageLinks } })).toBe(true);
+
+		expect(mode.vibeModeEnabled).toBe(true);
+		expect(activate).toHaveBeenCalledTimes(2);
+		const input = await waiter;
+		expect(input.text).toBe("[Image #1, 10x10] fix this");
+		expect(input.images).toEqual(images);
+		expect(input.imageLinks).toEqual(imageLinks);
+	});
+
 	it("rejects an explicit /vibe while the Vibe default is still rolling back", async () => {
 		await mode.init({ suppressWelcomeIntro: true });
 		const { first, release, activate } = await holdDefaultInSecondCleanup();
@@ -591,7 +645,7 @@ describe("InteractiveMode vibe mode toggle", () => {
 				const pending = mode.getUserInput();
 				void pending.then(input => resolved.push(input));
 			};
-			let held: Awaited<ReturnType<typeof holdDefaultInSecondCleanup>> | undefined;
+			let held: HeldDefaultRollback | undefined;
 			try {
 				if (phase === "before") {
 					held = await holdDefaultInSecondCleanup();
